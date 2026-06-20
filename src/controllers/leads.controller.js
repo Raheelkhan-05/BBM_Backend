@@ -14,6 +14,7 @@ const supabaseAdmin = createClient(
 // ── Helpers ────────────────────────────────────────────────────
 function extractLeadFields(body) {
   const {
+    prospect_id,
     company_name,
     country,
     state,
@@ -47,6 +48,7 @@ function extractLeadFields(body) {
   } = body;
 
   return {
+    prospect_id: prospect_id || null,
     company_name,
     country: country || "India",
     state,

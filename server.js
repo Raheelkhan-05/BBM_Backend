@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 
 import authRoutes from "./src/routes/auth.routes.js";
+import prospects from "./src/routes/prospectsRoutes.js";
 import leads from "./src/routes/leads.js";
 import rfqsRouter from "./src/routes/rfqs.js";
 import productsRouter from "./src/routes/products.js";
@@ -20,6 +21,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use("/api/auth", authRoutes);
+app.use("/api/prospects", prospects);
 app.use("/api/leads", leads);
 app.use("/api/rfqs", rfqsRouter);
 app.use("/api/products", productsRouter);

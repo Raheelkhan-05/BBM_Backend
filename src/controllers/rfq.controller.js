@@ -60,7 +60,7 @@ export const getLeadsForRFQ = async (req, res) => {
 
     let query = supabaseAdmin
       .from("leads")
-      .select("id, company_name, primary_contact_name, city, country, state")
+      .select("id, company_name, primary_contact_name, city, state, country, zone, route, nature_of_business, potential_product_name, potential_product_category, potential_product_sub_category")
       .is("deleted_at", null)
       .order("company_name", { ascending: true });
 
