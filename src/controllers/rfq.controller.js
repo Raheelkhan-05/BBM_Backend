@@ -1,12 +1,11 @@
 import { supabase } from "../config/supabase.js";
-
 import { sendMail } from "../config/mailer.js";
 import {
   rfqCreatedSalesperson,
   rfqCreatedCoordinator,
 } from "../config/emailTemplates.js";
-
 import { createClient } from "@supabase/supabase-js";
+
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
@@ -14,10 +13,12 @@ const supabaseAdmin = createClient(
 
 const COORDINATOR_EMAIL = process.env.SALES_COORDINATOR_EMAIL;
 
-// helper — get salesperson email from users table
 async function getSalespersonEmail(userId) {
   const { data } = await supabaseAdmin
-    .from("users").select("email").eq("id", userId).single();
+    .from("users")
+    .select("email")
+    .eq("id", userId)
+    .single();
   return data?.email || null;
 }
 
@@ -30,7 +31,7 @@ export const getRFQs = async (req, res) => {
       .from("rfqs")
       .select(`
         *,
-        leads(id, company_name, contact_name, city),
+        leads(id, company_name, primary_contact_name, city, country, state),
         users(id, email, role),
         rfq_followups(*),
         samples(id, sample_status, follow_up_date, updated_at),
@@ -51,41 +52,14 @@ export const getRFQs = async (req, res) => {
   }
 };
 
-// export const getRFQs = async (req, res) => {
-//   try {
-//     const { id: userId, role } = req.user;
-
-//     let query = supabaseAdmin
-//       .from("rfqs")
-//       .select(`
-//         *,
-//         leads(id, company_name, contact_name, city),
-//         users(id, email, role),
-//         rfq_followups(*)
-//       `)
-//       .order("created_at", { ascending: false });
-
-//     if (role !== "Admin") {
-//       query = query.eq("created_by", userId);
-//     }
-
-//     const { data, error } = await query;
-//     if (error) return res.status(400).json({ success: false, message: error.message });
-
-//     return res.json({ success: true, rfqs: data });
-//   } catch (err) {
-//     return res.status(500).json({ success: false, message: err.message });
-//   }
-// };
-
-// GET /api/rfqs/leads — fetch only leads this user can create RFQs for
+// GET /api/rfqs/leads
 export const getLeadsForRFQ = async (req, res) => {
   try {
     const { id: userId, role } = req.user;
 
     let query = supabaseAdmin
       .from("leads")
-      .select("id, company_name, contact_name, city")
+      .select("id, company_name, primary_contact_name, city, country, state")
       .order("company_name", { ascending: true });
 
     if (role !== "Admin") {
@@ -110,6 +84,7 @@ export const createRFQ = async (req, res) => {
       product_name, product_description, consumption_per_month, unit,
       sample_required, sample_description, sample_received_from_customer,
       quotation_required, quotation_description, existing_supplier_brand,
+      notes, target_price, tds_available,
     } = req.body;
 
     if (role !== "Admin") {
@@ -132,13 +107,15 @@ export const createRFQ = async (req, res) => {
         sample_received_from_customer: sample_received_from_customer ?? false,
         quotation_required: quotation_required ?? false,
         quotation_description, existing_supplier_brand,
+        notes: notes || null,
+        target_price: target_price || null,
+        tds_available: tds_available ?? false,
         created_by: userId,
       }])
       .select().single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    // ── Auto-create sample / quotation records ─────────────────
     if (sample_required) {
       await supabaseAdmin.from("samples").insert([{
         rfq_id: data.id, sample_required: true,
@@ -152,17 +129,14 @@ export const createRFQ = async (req, res) => {
       }]);
     }
 
-    // ── Send emails (non-blocking) ─────────────────────────────
     const salespersonEmail = await getSalespersonEmail(userId);
-    const rfqPayload = { ...data };
-
     if (salespersonEmail) {
-      sendMail(rfqCreatedSalesperson({ salespersonEmail, rfq: rfqPayload }));
+      sendMail(rfqCreatedSalesperson({ salespersonEmail, rfq: data }));
     }
     if (COORDINATOR_EMAIL && (sample_required || quotation_required)) {
       sendMail(rfqCreatedCoordinator({
         coordinatorEmail: COORDINATOR_EMAIL,
-        rfq: rfqPayload,
+        rfq: data,
         salespersonEmail: salespersonEmail || "Unknown",
       }));
     }
@@ -172,7 +146,6 @@ export const createRFQ = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
-
 
 // PUT /api/rfqs/:id
 export const updateRFQ = async (req, res) => {
@@ -184,6 +157,7 @@ export const updateRFQ = async (req, res) => {
       product_name, product_description, consumption_per_month, unit,
       sample_required, sample_description, sample_received_from_customer,
       quotation_required, quotation_description, existing_supplier_brand,
+      notes, target_price, tds_available,
     } = req.body;
 
     const { data: existing, error: fetchError } = await supabaseAdmin
@@ -207,6 +181,9 @@ export const updateRFQ = async (req, res) => {
         sample_received_from_customer: sample_received_from_customer ?? false,
         quotation_required: quotation_required ?? false,
         quotation_description, existing_supplier_brand,
+        notes: notes || null,
+        target_price: target_price || null,
+        tds_available: tds_available ?? false,
         updated_at: new Date().toISOString(),
       })
       .eq("id", id).select().single();
@@ -215,17 +192,15 @@ export const updateRFQ = async (req, res) => {
 
     const salespersonEmail = await getSalespersonEmail(existing.created_by);
 
-    // ── Sample toggle ──────────────────────────────────────────
+    // Sample toggle
     if (sample_required && !existing.sample_required) {
       await supabaseAdmin.from("samples").insert([{
         rfq_id: id, sample_required: true,
         sample_status: null, follow_up_date: null, created_by: userId,
       }]);
-      // Notify coordinator that a sample is now required
       if (COORDINATOR_EMAIL) {
         sendMail(rfqCreatedCoordinator({
-          coordinatorEmail: COORDINATOR_EMAIL,
-          rfq: data,
+          coordinatorEmail: COORDINATOR_EMAIL, rfq: data,
           salespersonEmail: salespersonEmail || "Unknown",
         }));
       }
@@ -238,7 +213,7 @@ export const updateRFQ = async (req, res) => {
       }
     }
 
-    // ── Quotation toggle ───────────────────────────────────────
+    // Quotation toggle
     if (quotation_required && !existing.quotation_required) {
       await supabaseAdmin.from("quotations").insert([{
         rfq_id: id, quotation_required: true,
@@ -246,8 +221,7 @@ export const updateRFQ = async (req, res) => {
       }]);
       if (COORDINATOR_EMAIL) {
         sendMail(rfqCreatedCoordinator({
-          coordinatorEmail: COORDINATOR_EMAIL,
-          rfq: data,
+          coordinatorEmail: COORDINATOR_EMAIL, rfq: data,
           salespersonEmail: salespersonEmail || "Unknown",
         }));
       }
@@ -281,7 +255,11 @@ export const deleteRFQ = async (req, res) => {
       return res.status(403).json({ success: false, message: "Not authorized" });
 
     const { error } = await supabaseAdmin.from("rfqs").delete().eq("id", id);
-    if (error) return res.status(400).json({ success: false, message: error.message });
+    if (error) 
+      {
+          console.log(error);
+        return res.status(400).json({ success: false, message: error.message });
+      }
 
     return res.json({ success: true, message: "RFQ deleted" });
   } catch (err) {
@@ -289,7 +267,7 @@ export const deleteRFQ = async (req, res) => {
   }
 };
 
-// ── FOLLOW-UPS ─────────────────────────────────────────────────────────────
+// ── FOLLOW-UPS ─────────────────────────────────────────────────
 
 // GET /api/rfqs/:rfqId/followups
 export const getFollowups = async (req, res) => {
@@ -297,7 +275,6 @@ export const getFollowups = async (req, res) => {
     const { rfqId } = req.params;
     const { id: userId, role } = req.user;
 
-    // Verify access to parent RFQ
     const { data: rfq, error: rfqError } = await supabaseAdmin
       .from("rfqs").select("created_by").eq("id", rfqId).single();
 
@@ -331,7 +308,6 @@ export const createFollowup = async (req, res) => {
       enquiry_status, remark,
     } = req.body;
 
-    // Verify access to parent RFQ
     const { data: rfq, error: rfqError } = await supabaseAdmin
       .from("rfqs").select("created_by").eq("id", rfqId).single();
 

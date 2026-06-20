@@ -15,14 +15,14 @@ const authenticate = async (req, res, next) => {
   const token = header.split(" ")[1];
 
   try {
-    console.log("Token:", token);
-    console.log("Length:", token.length);
+    // console.log("Token:", token);
+    // console.log("Length:", token.length);
     // 1. Let Supabase verify its own token — no JWT_SECRET needed
     const { data: { user: authUser }, error: authError } =
       await supabaseAdmin.auth.getUser(token);
 
-    console.log(authError);
-    console.log(authUser);
+    // console.log(authError);
+    // console.log(authUser);
 
     if (authError || !authUser) {
       return res.status(401).json({ message: "Invalid or expired token" });

@@ -24,7 +24,7 @@ export const getSamples = async (req, res) => {
           product_name, sample_description, product_description,
           consumption_per_month, unit, existing_supplier_brand,
           created_by,
-          leads(company_name, contact_name, city, mobile_number)
+          leads(company_name, primary_contact_name, city, primary_phone)
         ),
         users(id, email)
       `)
