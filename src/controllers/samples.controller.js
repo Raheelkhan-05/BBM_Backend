@@ -28,6 +28,7 @@ export const getSamples = async (req, res) => {
         ),
         users(id, email)
       `)
+      .is("deleted_at", null)
       .order("created_at", { ascending: false });
 
     if (error) return res.status(400).json({ success: false, message: error.message });

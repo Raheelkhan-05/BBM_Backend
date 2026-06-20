@@ -24,7 +24,13 @@ export const getRoutes = async (req, res) => {
 // POST /api/routes — all authenticated (salesperson can create while filling lead)
 export const createRoute = async (req, res) => {
   try {
-    const { city, zone, route } = req.body;
+    const {
+      country,
+      state,
+      city,
+      zone,
+      route,
+    } = req.body;
     if (!city?.trim() || !zone?.trim() || !route?.trim())
       return res.status(400).json({ success: false, message: "City, Zone and Route are required" });
 
@@ -32,14 +38,18 @@ export const createRoute = async (req, res) => {
     const { data: existing } = await supabaseAdmin
       .from("routes")
       .select("id")
-      .eq("city", city.trim()).eq("zone", zone.trim()).eq("route", route.trim())
+      .eq("country", country.trim())
+      .eq("state", state.trim())
+      .eq("city", city.trim())
+      .eq("zone", zone.trim())
+      .eq("route", route.trim())
       .single();
 
     if (existing) return res.json({ success: true, route: existing, existed: true });
 
     const { data, error } = await supabaseAdmin
       .from("routes")
-      .insert([{ city: city.trim(), zone: zone.trim(), route: route.trim() }])
+      .insert([{ country: country.trim(), state: state.trim(), city: city.trim(), zone: zone.trim(), route: route.trim() }])
       .select().single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });
@@ -53,13 +63,13 @@ export const createRoute = async (req, res) => {
 export const updateRoute = async (req, res) => {
   try {
     const { id } = req.params;
-    const { city, zone, route } = req.body;
+    const { country, state, city, zone, route } = req.body;
     if (!city?.trim() || !zone?.trim() || !route?.trim())
       return res.status(400).json({ success: false, message: "All fields are required" });
 
     const { data, error } = await supabaseAdmin
       .from("routes")
-      .update({ city: city.trim(), zone: zone.trim(), route: route.trim() })
+      .update({ country: country.trim(), state: state.trim(), city: city.trim(), zone: zone.trim(), route: route.trim() })
       .eq("id", id).select().single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });

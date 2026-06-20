@@ -37,6 +37,7 @@ export const getRFQs = async (req, res) => {
         samples(id, sample_status, follow_up_date, updated_at),
         quotations(id, quotation_status, follow_up_date, updated_at)
       `)
+      .is("deleted_at", null)
       .order("created_at", { ascending: false });
 
     if (role !== "Admin") {
@@ -60,6 +61,7 @@ export const getLeadsForRFQ = async (req, res) => {
     let query = supabaseAdmin
       .from("leads")
       .select("id, company_name, primary_contact_name, city, country, state")
+      .is("deleted_at", null)
       .order("company_name", { ascending: true });
 
     if (role !== "Admin") {
@@ -247,19 +249,45 @@ export const deleteRFQ = async (req, res) => {
     const { id: userId, role } = req.user;
 
     const { data: existing, error: fetchError } = await supabaseAdmin
-      .from("rfqs").select("created_by").eq("id", id).single();
+      .from("rfqs")
+      .select("created_by")
+      .eq("id", id)
+      .is("deleted_at", null)
+      .single();
 
     if (fetchError || !existing)
       return res.status(404).json({ success: false, message: "RFQ not found" });
     if (role !== "Admin" && existing.created_by !== userId)
       return res.status(403).json({ success: false, message: "Not authorized" });
 
-    const { error } = await supabaseAdmin.from("rfqs").delete().eq("id", id);
-    if (error) 
-      {
-          console.log(error);
-        return res.status(400).json({ success: false, message: error.message });
-      }
+    const now = new Date().toISOString();
+
+    // Soft-delete samples, quotations, followups under this RFQ
+    await supabaseAdmin
+      .from("samples")
+      .update({ deleted_at: now })
+      .eq("rfq_id", id)
+      .is("deleted_at", null);
+
+    await supabaseAdmin
+      .from("quotations")
+      .update({ deleted_at: now })
+      .eq("rfq_id", id)
+      .is("deleted_at", null);
+
+    await supabaseAdmin
+      .from("rfq_followups")
+      .update({ deleted_at: now })
+      .eq("rfq_id", id)
+      .is("deleted_at", null);
+
+    // Soft-delete the RFQ itself
+    const { error } = await supabaseAdmin
+      .from("rfqs")
+      .update({ deleted_at: now })
+      .eq("id", id);
+
+    if (error) return res.status(400).json({ success: false, message: error.message });
 
     return res.json({ success: true, message: "RFQ deleted" });
   } catch (err) {

@@ -85,6 +85,7 @@ export const getLeads = async (req, res) => {
     let query = supabaseAdmin
       .from("leads")
       .select("*, users(id, email, role)")
+      .is("deleted_at", null)
       .order("created_at", { ascending: false });
 
     if (role !== "Admin") {
@@ -202,21 +203,60 @@ export const deleteLead = async (req, res) => {
       .from("leads")
       .select("created_by")
       .eq("id", id)
+      .is("deleted_at", null)
       .single();
 
-    if (fetchError || !existing) {
+    if (fetchError || !existing)
       return res.status(404).json({ success: false, message: "Lead not found" });
-    }
-    if (role !== "Admin" && existing.created_by !== userId) {
+    if (role !== "Admin" && existing.created_by !== userId)
       return res.status(403).json({ success: false, message: "Not authorized" });
+
+    const now = new Date().toISOString();
+
+    // 1. Get all RFQ ids under this lead
+    const { data: rfqs } = await supabaseAdmin
+      .from("rfqs")
+      .select("id")
+      .eq("lead_id", id)
+      .is("deleted_at", null);
+
+    if (rfqs?.length) {
+      const rfqIds = rfqs.map((r) => r.id);
+
+      // 2. Soft-delete samples, quotations, followups under these RFQs
+      await supabaseAdmin
+        .from("samples")
+        .update({ deleted_at: now })
+        .in("rfq_id", rfqIds)
+        .is("deleted_at", null);
+
+      await supabaseAdmin
+        .from("quotations")
+        .update({ deleted_at: now })
+        .in("rfq_id", rfqIds)
+        .is("deleted_at", null);
+
+      await supabaseAdmin
+        .from("rfq_followups")
+        .update({ deleted_at: now })
+        .in("rfq_id", rfqIds)
+        .is("deleted_at", null);
+
+      // 3. Soft-delete the RFQs
+      await supabaseAdmin
+        .from("rfqs")
+        .update({ deleted_at: now })
+        .in("id", rfqIds)
+        .is("deleted_at", null);
     }
 
-    const { error } = await supabaseAdmin.from("leads").delete().eq("id", id);
+    // 4. Soft-delete the lead itself
+    const { error } = await supabaseAdmin
+      .from("leads")
+      .update({ deleted_at: now })
+      .eq("id", id);
 
-    if (error) {
-        console.log(error);
-      return res.status(400).json({ success: false, message: error.message });
-    }
+    if (error) return res.status(400).json({ success: false, message: error.message });
 
     return res.json({ success: true, message: "Lead deleted" });
   } catch (err) {
