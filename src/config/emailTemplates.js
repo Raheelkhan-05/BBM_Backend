@@ -86,7 +86,7 @@ const layout = (headerColor, headerTitle, headerSubtitle, bodyContent) => `
                     <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
                       <tr>
                         <td>
-                          <span style="font-size:13px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:${headerColor}">
+                          <span style="font-size:13px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#6366f1">
                             Brand Brigade Marketing
                           </span>
                         </td>
