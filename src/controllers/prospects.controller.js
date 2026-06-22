@@ -1,5 +1,7 @@
 // controllers/prospectsController.js
 import { createClient } from "@supabase/supabase-js";
+import { sendMail } from "../config/mailer.js";
+import { prospectCreatedSalesperson } from "../config/emailTemplates.js";
 
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
@@ -63,8 +65,6 @@ export const getProspects = async (req, res) => {
 };
 
 /* ─── GET /api/prospects/mine ─────────────────────────────────── */
-// Lightweight endpoint used by the Lead form prospect-picker.
-// Returns only the current user's prospects (always, regardless of role).
 export const getMyProspects = async (req, res) => {
   try {
     const { id: userId } = req.user;
@@ -87,7 +87,7 @@ export const getMyProspects = async (req, res) => {
 /* ─── POST /api/prospects ─────────────────────────────────────── */
 export const createProspect = async (req, res) => {
   try {
-    const { id: userId } = req.user;
+    const { id: userId, email: salespersonEmail } = req.user;
 
     const fields = extractProspectFields(req.body);
 
@@ -102,6 +102,11 @@ export const createProspect = async (req, res) => {
       .single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });
+
+    // Acknowledge the salesperson who filed the prospect
+    if (salespersonEmail) {
+      sendMail(prospectCreatedSalesperson({ salespersonEmail, prospect: data }));
+    }
 
     return res.status(201).json({ success: true, prospect: data });
   } catch (err) {

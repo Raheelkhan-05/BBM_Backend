@@ -133,15 +133,17 @@ export const createLead = async (req, res) => {
 
     if (salespersonEmail) {
       sendMail(leadCreatedSalesperson({ salespersonEmail, lead: data }));
+      console.log(data);
+      
     }
-    if (data.email || data.primary_email) {
-      sendMail(
-        leadWelcomeCustomer({
-          customerEmail: data.primary_email || data.email,
-          lead: data,
-        })
-      );
-    }
+    // if (data.primary_email || data.secondary_email) {
+    //   sendMail(
+    //     leadWelcomeCustomer({
+    //       customerEmail: data.primary_email || data.secondary_email,
+    //       lead: data,
+    //     })
+    //   );
+    // }
 
     return res.status(201).json({ success: true, lead: data });
   } catch (err) {

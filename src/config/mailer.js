@@ -10,13 +10,16 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-export const sendMail = async ({ to, subject, html }) => {
+export const sendMail = async ({ to, subject, html, headers }) => {
   try {
     await transporter.sendMail({
       from: process.env.SMTP_FROM,
       to,
       subject,
       html,
+      // Threading headers (In-Reply-To, References, Message-ID).
+      // Nodemailer accepts them as a plain object here.
+      ...(headers ? { headers } : {}),
     });
   } catch (err) {
     console.error("Mail error:", err.message);
