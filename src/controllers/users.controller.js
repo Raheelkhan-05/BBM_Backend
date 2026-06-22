@@ -1,3 +1,5 @@
+//users.controller.js
+
 import { createClient } from "@supabase/supabase-js";
 import { supabase } from "../config/supabase.js";
 

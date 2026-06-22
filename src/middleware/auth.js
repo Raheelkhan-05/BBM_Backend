@@ -1,3 +1,5 @@
+//backend/auth.js
+
 import { createClient } from "@supabase/supabase-js";
 
 const supabaseAdmin = createClient(

@@ -1,4 +1,8 @@
 // emailTemplates.js
+
+import crypto from "crypto";
+
+
 // Professional enterprise-grade email templates for BBM CRM
 
 // ── Design tokens ─────────────────────────────────────────────────────────
@@ -579,3 +583,134 @@ export const prospectCreatedSalesperson = ({ salespersonEmail, prospect }) => ({
     ${metaLine("You can view and manage this prospect at any time from your BBM dashboard.")}
   `),
 });
+
+export const otpEmail = ({ email, name, token }) => {
+  // Guarantee exactly 6 digits, zero-padded just in case
+  const code     = String(token).replace(/\D/g, "").slice(0, 6).padStart(6, "0");
+  const display  = code.slice(0, 3) + " " + code.slice(3); // "083 941"
+
+  // Deterministic thread root per recipient email so every OTP sent to the
+  // same address lands in the same Gmail/Outlook/Apple Mail thread.
+  // (crypto already imported at the top of this file.)
+  const emailHash = crypto.createHash("sha256").update(email.toLowerCase().trim()).digest("hex").slice(0, 16);
+  const rootId = `<otp-${emailHash}@bbm.crm>`;
+
+  // One <td> per digit — clean, readable in all email clients
+  const digitCells = code
+    .split("")
+    .map(
+      (d) => `<td style="
+          width:46px;height:58px;
+          background:#eef2ff;
+          border:2px solid #c7d2fe;
+          border-radius:10px;
+          text-align:center;
+          vertical-align:middle;
+          font-size:30px;
+          font-weight:900;
+          color:#3730a3;
+          font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,monospace;
+          padding:0;
+        ">${d}</td><td style="width:8px"></td>`
+    )
+    .join("");
+
+  return {
+    to:      email,
+    subject: "[BBM] Your sign-in code",
+    headers: threadHeaders(rootId),
+    html: `<!DOCTYPE html>
+...
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>BBM Sign-in Code</title>
+</head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;-webkit-font-smoothing:antialiased">
+  <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="padding:40px 16px">
+    <tr><td align="center">
+      <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:520px">
+
+        <!-- Header -->
+        <tr><td>
+          <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#1e1b4b;border-radius:14px 14px 0 0">
+            <tr>
+              <td style="padding:20px 32px;border-bottom:3px solid #6366f1">
+                <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+                  <tr>
+                    <td><span style="font-size:13px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:#6366f1">Brand Brigade Marketing</span></td>
+                    <td align="right"><span style="font-size:11px;color:#94a3b8;letter-spacing:0.05em">Automated Notification</span></td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:24px 32px 28px">
+                <p style="margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:#cbd5e1">Authentication</p>
+                <h1 style="margin:0;font-size:22px;font-weight:800;color:#ffffff;letter-spacing:-0.02em;line-height:1.25">Your BBM sign-in code</h1>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <!-- Body -->
+        <tr><td>
+          <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#ffffff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 14px 14px">
+            <tr><td style="padding:36px 32px">
+
+              <p style="margin:0 0 6px;font-size:14px;color:#0f172a;line-height:1.65">Hi${name ? ` <strong>${name}</strong>` : ""},</p>
+              <p style="margin:0 0 28px;font-size:14px;color:#0f172a;line-height:1.65">
+                Use the code below to sign in to your BBM account.
+                This code is valid for <strong>10 minutes</strong> and can only be used once.
+              </p>
+
+              <!-- Code block -->
+              <table cellpadding="0" cellspacing="0" role="presentation"
+                style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:12px;padding:24px 28px;margin:0 auto 28px;width:100%">
+                <tr><td align="center">
+                  <p style="margin:0 0 16px;font-size:10px;font-weight:800;letter-spacing:0.18em;text-transform:uppercase;color:#6366f1">Sign-in code</p>
+
+                  <!-- 6 digit boxes -->
+                  <table cellpadding="0" cellspacing="0" role="presentation" style="margin:0 auto">
+                    <tr>${digitCells}</tr>
+                  </table>
+
+                </td></tr>
+              </table>
+
+              <!-- Security note -->
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;margin-bottom:24px">
+                <tr>
+                  <td style="padding:14px 16px;vertical-align:top;width:28px;font-size:16px">⚠️</td>
+                  <td style="padding:14px 16px 14px 0;vertical-align:top">
+                    <p style="margin:0;font-size:12px;color:#92400e;line-height:1.6">
+                      <strong>Never share this code.</strong>
+                      BBM staff will never ask for it. If you did not request this, you can safely ignore this email.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td></tr>
+          </table>
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="padding:22px 8px 8px;text-align:center">
+          <p style="margin:0;font-size:11px;color:#94a3b8;line-height:1.6">
+            This is an automated message from <strong style="color:#64748b">Brand Brigade Marketing</strong>.
+            Please do not reply to this email.
+          </p>
+          <p style="margin:6px 0 0;font-size:11px;color:#94a3b8">
+            &copy; ${new Date().getFullYear()} BBM &middot; All rights reserved
+          </p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+  };
+};
