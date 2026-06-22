@@ -133,7 +133,7 @@ export const createLead = async (req, res) => {
 
     if (salespersonEmail) {
       sendMail(leadCreatedSalesperson({ salespersonEmail, lead: data }));
-      console.log(data);
+      // console.log(data);
       
     }
     // if (data.primary_email || data.secondary_email) {
