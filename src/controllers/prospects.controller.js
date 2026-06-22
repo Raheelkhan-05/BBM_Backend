@@ -22,6 +22,7 @@ function extractProspectFields(body) {
     next_action,
     next_action_date,
     feedback,
+    prospect_status,
   } = body;
 
   return {
@@ -36,6 +37,7 @@ function extractProspectFields(body) {
     next_action:      next_action      || null,
     next_action_date: next_action_date || null,
     feedback:         feedback         || null,
+    prospect_status:  prospect_status  || null, 
   };
 }
 
@@ -71,7 +73,7 @@ export const getMyProspects = async (req, res) => {
 
     const { data, error } = await supabaseAdmin
       .from("prospects")
-      .select("id, company_name, industry, city, zone, route, state, country, source, next_action, next_action_date, feedback")
+      .select("id, company_name, industry, city, zone, route, state, country, source, next_action, next_action_date, feedback, prospect_status")
       .is("deleted_at", null)
       .eq("created_by", userId)
       .order("company_name", { ascending: true });
