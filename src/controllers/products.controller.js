@@ -1,3 +1,5 @@
+//products.controller.js
+
 import { supabase } from "../config/supabase.js";
 import { createClient } from "@supabase/supabase-js";
 import { sendMail } from "../config/mailer.js";
@@ -32,7 +34,7 @@ export const getProducts = async (req, res) => {
 // POST /api/products — Admin & SalesCoordinator only
 export const createProduct = async (req, res) => {
   try {
-    const { category, sub_category, product_name } = req.body;
+    const { category, sub_category, product_name, brochure_url } = req.body;
     const actorEmail = req.user?.email;
 
     if (!category?.trim() || !sub_category?.trim() || !product_name?.trim())
@@ -40,7 +42,7 @@ export const createProduct = async (req, res) => {
 
     const { data, error } = await supabaseAdmin
       .from("products")
-      .insert([{ category: category.trim(), sub_category: sub_category.trim(), product_name: product_name.trim() }])
+      .insert([{ category: category.trim(), sub_category: sub_category.trim(), product_name: product_name.trim(), brochure_url: brochure_url?.trim() || null }])
       .select().single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });
@@ -64,7 +66,7 @@ export const createProduct = async (req, res) => {
 export const updateProduct = async (req, res) => {
   try {
     const { id } = req.params;
-    const { category, sub_category, product_name } = req.body;
+    const { category, sub_category, product_name, brochure_url } = req.body;
     const actorEmail = req.user?.email;
 
     if (!category?.trim() || !sub_category?.trim() || !product_name?.trim())
@@ -72,7 +74,7 @@ export const updateProduct = async (req, res) => {
 
     const { data, error } = await supabaseAdmin
       .from("products")
-      .update({ category: category.trim(), sub_category: sub_category.trim(), product_name: product_name.trim(), updated_at: new Date().toISOString() })
+      .update({ category: category.trim(), sub_category: sub_category.trim(), product_name: product_name.trim(), updated_at: new Date().toISOString(), brochure_url: brochure_url?.trim() || null })
       .eq("id", id).select().single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });

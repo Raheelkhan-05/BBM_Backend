@@ -244,6 +244,9 @@ const productDetailBlock = (product) => detailTable(`
   ${innerRow("Category",     product.category)}
   ${innerRow("Sub-Category", product.sub_category)}
   ${innerRow("Product Name", product.product_name)}
+  ${product.brochure_url
+    ? innerRow("Brochure", `<a href="${product.brochure_url}" style="color:#4338ca;text-decoration:underline;font-weight:600" target="_blank">View Brochure ↗</a>`)
+    : ""}
 `);
 
 // ═════════════════════════════════════════════════════════════════════════
