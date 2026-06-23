@@ -1,3 +1,5 @@
+//quotations.controller.js
+
 import { createClient } from "@supabase/supabase-js";
 import { sendMail } from "../config/mailer.js";
 import {

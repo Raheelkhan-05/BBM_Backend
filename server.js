@@ -11,6 +11,8 @@ import routesRouter from "./src/routes/routes.js";
 import samplesRouter from "./src/routes/samples.js";
 import quotationsRouter from "./src/routes/quotations.js";
 import auth from "./src/middleware/auth.js";
+import dashboardRoutes from "./src/routes/dashboard.routes.js";
+
 
 dotenv.config();
 
@@ -28,6 +30,7 @@ app.use("/api/products", productsRouter);
 app.use("/api/routes", routesRouter);
 app.use("/api/samples", samplesRouter);
 app.use("/api/quotations", quotationsRouter);
+app.use("/api/dashboard", dashboardRoutes);
 app.get("/api/me", auth, (req, res) => {
   res.json({
     id: req.user.id,

@@ -1,3 +1,5 @@
+//rfq.controller.js
+
 import { supabase } from "../config/supabase.js";
 import { sendMail } from "../config/mailer.js";
 import {
