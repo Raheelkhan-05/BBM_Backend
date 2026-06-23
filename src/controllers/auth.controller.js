@@ -68,11 +68,13 @@ const storeOtp = async (email, code) => {
  * The SMTP handshake can take 1-2s — we never need to wait for it.
  * Errors are logged but don't bubble up to the HTTP response.
  */
-const sendMailAsync = (mailOptions) => {
-  sendMail(mailOptions).catch((err) =>
-    console.error("Email send failed (async):", err.message)
-  );
-};
+// const sendMailAsync = (mailOptions) => {
+//   sendMail(mailOptions).catch((err) =>
+//     console.error("Email send failed (async):", err.message)
+//   );
+// };
+
+
 
 /**
  * Verify submitted OTP against stored hash.
@@ -214,7 +216,7 @@ export const signup = async (req, res) => {
     }
 
     // Fire-and-forget — don't make the user wait for SMTP
-    sendMailAsync(otpEmail({ email: cleanEmail, name: first_name.trim(), token: code }));
+    sendMail(otpEmail({ email: cleanEmail, name: first_name.trim(), token: code }));
 
     return res.status(201).json({
       success: true,
@@ -236,14 +238,11 @@ export const sendOtp = async (req, res) => {
 
     const cleanEmail = email.toLowerCase().trim();
 
-    // Fetch user + generate OTP code in parallel (code gen is sync but wrapping it
-    // makes the intent clear and keeps the pattern consistent)
     const [{ data: user }, code] = await Promise.all([
       supabaseAdmin.from("users").select("id, first_name").eq("email", cleanEmail).maybeSingle(),
       Promise.resolve(makeOtpCode()),
     ]);
 
-    // Generic response — don't reveal whether email is registered
     if (!user) {
       return res.json({
         success: true,
@@ -251,11 +250,13 @@ export const sendOtp = async (req, res) => {
       });
     }
 
-    // Hash + store OTP (bcrypt is the bottleneck here at ~800ms)
-    await storeOtp(cleanEmail, code);
-
-    // Fire-and-forget — respond immediately, email sends in background
-    sendMailAsync(otpEmail({ email: cleanEmail, name: user.first_name || "", token: code }));
+    // Run bcrypt hash + send email in parallel
+    // storeOtp does the hash+upsert; sendMail does SMTP
+    // Both are now awaited so Vercel doesn't kill the function before email sends
+    await Promise.all([
+      storeOtp(cleanEmail, code),
+      sendMail(otpEmail({ email: cleanEmail, name: user.first_name || "", token: code })),
+    ]);
 
     return res.json({
       success: true,
