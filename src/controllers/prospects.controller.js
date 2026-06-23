@@ -1,10 +1,4 @@
-// controllers/prospects.controller.js — optimised
-//
-// Changes:
-//  updateProspect: ownership check merged into UPDATE filter (1 DB call instead of 2)
-//  deleteProspect: ownership check merged into UPDATE filter (1 DB call instead of 2)
-//  createProspect: email is fire-and-forget
-
+// controllers/prospects.controller.js
 import { createClient } from "@supabase/supabase-js";
 import { sendMail } from "../config/mailer.js";
 import { prospectCreatedSalesperson } from "../config/emailTemplates.js";
@@ -17,12 +11,29 @@ const supabaseAdmin = createClient(
 const sendMailAsync = (opts) =>
   sendMail(opts).catch((e) => console.error("Mail error:", e.message));
 
+// Always supply an explicit UTC timestamp so it doesn't rely on DB default
+const nowUTC = () => new Date().toISOString(); // e.g. "2024-06-15T09:32:11.000Z"
+
+function logProspect(prospectId, action, changedBy, snapshot = {}) {
+  supabaseAdmin
+    .from("prospect_logs")
+    .insert([{
+      prospect_id: prospectId,
+      action,
+      changed_by: changedBy,
+      changed_at: nowUTC(),   // explicit UTC — fixes timezone drift
+      ...snapshot,
+    }])
+    .then(({ error }) => {
+      if (error) console.error("prospect_logs write error:", error.message);
+    });
+}
+
 function extractProspectFields(body) {
   const {
     company_name, industry, country, state, city, zone, route,
     source, next_action, next_action_date, feedback, prospect_status,
   } = body;
-
   return {
     company_name,
     industry,
@@ -39,19 +50,15 @@ function extractProspectFields(body) {
   };
 }
 
-// GET /api/prospects
 export const getProspects = async (req, res) => {
   try {
     const { id: userId, role } = req.user;
-
     let query = supabaseAdmin
       .from("prospects")
       .select("*, users(id, email, role)")
       .is("deleted_at", null)
       .order("created_at", { ascending: false });
-
     if (role !== "Admin") query = query.eq("created_by", userId);
-
     const { data, error } = await query;
     if (error) return res.status(400).json({ success: false, message: error.message });
     return res.json({ success: true, prospects: data });
@@ -60,18 +67,15 @@ export const getProspects = async (req, res) => {
   }
 };
 
-// GET /api/prospects/mine
 export const getMyProspects = async (req, res) => {
   try {
     const { id: userId } = req.user;
-
     const { data, error } = await supabaseAdmin
       .from("prospects")
       .select("id, company_name, industry, city, zone, route, state, country, source, next_action, next_action_date, feedback, prospect_status")
       .is("deleted_at", null)
       .eq("created_by", userId)
       .order("company_name", { ascending: true });
-
     if (error) return res.status(400).json({ success: false, message: error.message });
     return res.json({ success: true, prospects: data });
   } catch (err) {
@@ -79,12 +83,10 @@ export const getMyProspects = async (req, res) => {
   }
 };
 
-// POST /api/prospects
 export const createProspect = async (req, res) => {
   try {
     const { id: userId, email: salespersonEmail } = req.user;
     const fields = extractProspectFields(req.body);
-
     if (!fields.company_name?.trim())
       return res.status(400).json({ success: false, message: "Company name is required" });
 
@@ -93,74 +95,73 @@ export const createProspect = async (req, res) => {
       .insert([{ ...fields, company_name: fields.company_name.trim(), created_by: userId }])
       .select()
       .single();
-
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    // Fire-and-forget
+    logProspect(data.id, "created", userId, { ...fields, company_name: fields.company_name.trim() });
     if (salespersonEmail) sendMailAsync(prospectCreatedSalesperson({ salespersonEmail, prospect: data }));
-
     return res.status(201).json({ success: true, prospect: data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// PUT /api/prospects/:id
-// OPTIMISED: ownership enforced in the UPDATE filter — no separate SELECT needed
 export const updateProspect = async (req, res) => {
   try {
     const { id } = req.params;
     const { id: userId, role } = req.user;
     const fields = extractProspectFields(req.body);
-
     if (!fields.company_name?.trim())
       return res.status(400).json({ success: false, message: "Company name is required" });
 
     let query = supabaseAdmin
       .from("prospects")
-      .update({ ...fields, company_name: fields.company_name.trim(), updated_at: new Date().toISOString() })
+      .update({ ...fields, company_name: fields.company_name.trim(), updated_at: nowUTC() })
       .eq("id", id)
       .is("deleted_at", null);
-
     if (role !== "Admin") query = query.eq("created_by", userId);
 
     const { data, error } = await query.select().single();
-
     if (error) {
       if (error.code === "PGRST116")
         return res.status(404).json({ success: false, message: "Prospect not found or not authorized" });
       return res.status(400).json({ success: false, message: error.message });
     }
 
+    logProspect(id, "updated", userId, { ...fields, company_name: fields.company_name.trim() });
     return res.json({ success: true, prospect: data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// DELETE /api/prospects/:id
-// OPTIMISED: ownership enforced in the UPDATE filter — no separate SELECT needed
 export const deleteProspect = async (req, res) => {
   try {
     const { id } = req.params;
     const { id: userId, role } = req.user;
 
+    // Fetch snapshot before soft-delete so we can log what existed
+    const { data: existing } = await supabaseAdmin
+      .from("prospects")
+      .select("company_name, industry, country, state, city, zone, route, source, next_action, next_action_date, feedback, prospect_status")
+      .eq("id", id)
+      .single();
+
     let query = supabaseAdmin
       .from("prospects")
-      .update({ deleted_at: new Date().toISOString() })
+      .update({ deleted_at: nowUTC() })
       .eq("id", id)
       .is("deleted_at", null);
-
     if (role !== "Admin") query = query.eq("created_by", userId);
 
     const { data, error } = await query.select("id").single();
-
     if (error) {
       if (error.code === "PGRST116")
         return res.status(404).json({ success: false, message: "Prospect not found or not authorized" });
       return res.status(400).json({ success: false, message: error.message });
     }
 
+    // Log with last-known snapshot so the audit trail shows what was deleted
+    logProspect(id, "deleted", userId, existing || {});
     return res.json({ success: true, message: "Prospect deleted" });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

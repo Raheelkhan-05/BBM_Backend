@@ -1,10 +1,4 @@
-// controllers/leads.controller.js — optimised
-//
-// Changes:
-//  updateLead:  ownership check merged into the UPDATE itself (1 DB call instead of 2)
-//  deleteLead:  samples/quotations/followups/rfqs soft-deleted in parallel (4 calls → 1 round)
-//  createLead:  email is fire-and-forget (don't block response on SMTP)
-
+// controllers/leads.controller.js
 import { createClient } from "@supabase/supabase-js";
 import { sendMail } from "../config/mailer.js";
 import { leadCreatedSalesperson } from "../config/emailTemplates.js";
@@ -17,6 +11,51 @@ const supabaseAdmin = createClient(
 const sendMailAsync = (opts) =>
   sendMail(opts).catch((e) => console.error("Mail error:", e.message));
 
+const nowUTC = () => new Date().toISOString();
+
+// All lead fields that belong in lead_logs snapshot
+function leadSnapshot(fields) {
+  return {
+    company_name:                   fields.company_name                   ?? null,
+    country:                        fields.country                        ?? null,
+    state:                          fields.state                          ?? null,
+    city:                           fields.city                           ?? null,
+    zone:                           fields.zone                           ?? null,
+    route:                          fields.route                          ?? null,
+    primary_contact_name:           fields.primary_contact_name           ?? null,
+    primary_designation:            fields.primary_designation            ?? null,
+    primary_phone:                  fields.primary_phone                  ?? null,
+    primary_email:                  fields.primary_email                  ?? null,
+    secondary_contact_name:         fields.secondary_contact_name         ?? null,
+    secondary_designation:          fields.secondary_designation          ?? null,
+    secondary_phone:                fields.secondary_phone                ?? null,
+    secondary_email:                fields.secondary_email                ?? null,
+    nature_of_business:             fields.nature_of_business             ?? null,
+    manufacturing_industry:         fields.manufacturing_industry         ?? null,
+    company_website:                fields.company_website                ?? null,
+    gst_number:                     fields.gst_number                     ?? null,
+    linkedin_profile:               fields.linkedin_profile               ?? null,
+    potential_product_category:     fields.potential_product_category     ?? null,
+    potential_product_sub_category: fields.potential_product_sub_category ?? null,
+    potential_product_name:         fields.potential_product_name         ?? null,
+  };
+}
+
+function logLead(leadId, action, changedBy, snapshot = {}) {
+  supabaseAdmin
+    .from("lead_logs")
+    .insert([{
+      lead_id:    leadId,
+      action,
+      changed_by: changedBy,
+      changed_at: nowUTC(),
+      ...snapshot,
+    }])
+    .then(({ error }) => {
+      if (error) console.error("lead_logs write error:", error.message);
+    });
+}
+
 function extractLeadFields(body) {
   const {
     prospect_id, company_name, country, state, city, zone, route,
@@ -25,7 +64,6 @@ function extractLeadFields(body) {
     nature_of_business, manufacturing_industry, company_website, gst_number, linkedin_profile,
     potential_product_category, potential_product_sub_category, potential_product_name,
   } = body;
-
   return {
     prospect_id: prospect_id || null,
     company_name,
@@ -47,19 +85,15 @@ function extractLeadFields(body) {
   };
 }
 
-// GET /api/leads
 export const getLeads = async (req, res) => {
   try {
     const { id: userId, role } = req.user;
-
     let query = supabaseAdmin
       .from("leads")
       .select("*, users(id, email, role)")
       .is("deleted_at", null)
       .order("created_at", { ascending: false });
-
     if (role !== "Admin") query = query.eq("created_by", userId);
-
     const { data, error } = await query;
     if (error) return res.status(400).json({ success: false, message: error.message });
     return res.json({ success: true, leads: data });
@@ -68,12 +102,10 @@ export const getLeads = async (req, res) => {
   }
 };
 
-// POST /api/leads
 export const createLead = async (req, res) => {
   try {
     const { id: userId, email: salespersonEmail } = req.user;
     const fields = extractLeadFields(req.body);
-
     if (!fields.company_name?.trim())
       return res.status(400).json({ success: false, message: "Company name is required" });
 
@@ -82,65 +114,54 @@ export const createLead = async (req, res) => {
       .insert([{ ...fields, company_name: fields.company_name.trim(), created_by: userId }])
       .select()
       .single();
-
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    // Fire-and-forget — don't make the user wait for SMTP
+    // Log full snapshot on create
+    logLead(data.id, "created", userId, leadSnapshot({ ...fields, company_name: fields.company_name.trim() }));
     if (salespersonEmail) sendMailAsync(leadCreatedSalesperson({ salespersonEmail, lead: data }));
-
     return res.status(201).json({ success: true, lead: data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// PUT /api/leads/:id
-// OPTIMISED: merge ownership check into the UPDATE filter — 1 DB call instead of 2
 export const updateLead = async (req, res) => {
   try {
     const { id } = req.params;
     const { id: userId, role } = req.user;
     const fields = extractLeadFields(req.body);
-
     if (!fields.company_name?.trim())
       return res.status(400).json({ success: false, message: "Company name is required" });
 
-    // Build the query — Admin can update any row; others can only update their own
     let query = supabaseAdmin
       .from("leads")
-      .update({ ...fields, company_name: fields.company_name.trim(), updated_at: new Date().toISOString() })
+      .update({ ...fields, company_name: fields.company_name.trim(), updated_at: nowUTC() })
       .eq("id", id)
       .is("deleted_at", null);
-
-    // Ownership enforced at DB level — no separate fetch needed
     if (role !== "Admin") query = query.eq("created_by", userId);
 
     const { data, error } = await query.select().single();
-
     if (error) {
-      // PGRST116 = no rows matched (either not found or not owned)
       if (error.code === "PGRST116")
         return res.status(404).json({ success: false, message: "Lead not found or not authorized" });
       return res.status(400).json({ success: false, message: error.message });
     }
 
+    logLead(id, "updated", userId, leadSnapshot({ ...fields, company_name: fields.company_name.trim() }));
     return res.json({ success: true, lead: data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// DELETE /api/leads/:id
-// OPTIMISED: cascade soft-deletes run in parallel instead of sequentially
 export const deleteLead = async (req, res) => {
   try {
     const { id } = req.params;
     const { id: userId, role } = req.user;
 
-    // Ownership check + get RFQ ids in one query
     const ownerQuery = supabaseAdmin
       .from("leads")
-      .select("created_by")
+      .select("created_by, company_name, country, state, city, zone, route, primary_contact_name, primary_email, nature_of_business, potential_product_name")
       .eq("id", id)
       .is("deleted_at", null)
       .single();
@@ -151,7 +172,6 @@ export const deleteLead = async (req, res) => {
       .eq("lead_id", id)
       .is("deleted_at", null);
 
-    // Fetch ownership + RFQ ids in parallel
     const [{ data: existing, error: fetchError }, { data: rfqs }] =
       await Promise.all([ownerQuery, rfqQuery]);
 
@@ -160,12 +180,9 @@ export const deleteLead = async (req, res) => {
     if (role !== "Admin" && existing.created_by !== userId)
       return res.status(403).json({ success: false, message: "Not authorized" });
 
-    const now = new Date().toISOString();
-
+    const now = nowUTC();
     if (rfqs?.length) {
       const rfqIds = rfqs.map((r) => r.id);
-
-      // Soft-delete all children in parallel — was 4 sequential awaits
       await Promise.all([
         supabaseAdmin.from("samples").update({ deleted_at: now }).in("rfq_id", rfqIds).is("deleted_at", null),
         supabaseAdmin.from("quotations").update({ deleted_at: now }).in("rfq_id", rfqIds).is("deleted_at", null),
@@ -177,6 +194,8 @@ export const deleteLead = async (req, res) => {
     const { error } = await supabaseAdmin.from("leads").update({ deleted_at: now }).eq("id", id);
     if (error) return res.status(400).json({ success: false, message: error.message });
 
+    // Log with last-known snapshot
+    logLead(id, "deleted", userId, leadSnapshot(existing));
     return res.json({ success: true, message: "Lead deleted" });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
