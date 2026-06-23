@@ -1,5 +1,7 @@
-import { createClient } from "@supabase/supabase-js";
+// samples.controller.js — optimised
+// Same pattern as quotations.controller.js
 
+import { createClient } from "@supabase/supabase-js";
 import { sendMail } from "../config/mailer.js";
 import {
   sampleUpdatedCoordinator,
@@ -13,6 +15,10 @@ const supabaseAdmin = createClient(
 
 const COORDINATOR_EMAIL = process.env.SALES_COORDINATOR_EMAIL;
 
+const sendMailAsync = (opts) =>
+  sendMail(opts).catch((e) => console.error("Mail error:", e.message));
+
+// GET /api/samples — joins kept as-is
 export const getSamples = async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -38,6 +44,7 @@ export const getSamples = async (req, res) => {
   }
 };
 
+// GET /api/samples/:id/logs
 export const getSampleLogs = async (req, res) => {
   try {
     const { id } = req.params;
@@ -54,70 +61,74 @@ export const getSampleLogs = async (req, res) => {
   }
 };
 
+// PUT /api/samples/:id
 export const updateSample = async (req, res) => {
   try {
     const { id } = req.params;
     const { id: userId, email: updaterEmail } = req.user;
     const { sample_status, follow_up_date } = req.body;
 
-    const { data: current, error: fetchErr } = await supabaseAdmin
-      .from("samples")
-      .select(`
-        *,
-        rfqs(
-          id, company_name, product_category, product_sub_category,
-          product_name, sample_description, product_description,
-          consumption_per_month, unit, existing_supplier_brand, created_by
-        )
-      `)
-      .eq("id", id).single();
+    // OPTIMISED: slim SELECT + UPDATE in parallel
+    const [
+      { data: current, error: fetchErr },
+      { data: updated, error: updateErr },
+    ] = await Promise.all([
+      supabaseAdmin
+        .from("samples")
+        .select("id, rfqs(id, company_name, product_category, product_sub_category, product_name, sample_description, created_by)")
+        .eq("id", id)
+        .single(),
+      supabaseAdmin
+        .from("samples")
+        .update({
+          sample_status,
+          follow_up_date: follow_up_date || null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", id)
+        .select()
+        .single(),
+    ]);
 
     if (fetchErr || !current)
       return res.status(404).json({ success: false, message: "Sample not found" });
+    if (updateErr)
+      return res.status(400).json({ success: false, message: updateErr.message });
 
-    const { data, error } = await supabaseAdmin
-      .from("samples")
-      .update({
+    const rfq = current.rfqs || {};
+
+    // Fire log insert + salesperson email fetch + emails — all in background
+    Promise.all([
+      supabaseAdmin.from("sample_logs").insert([{
+        sample_id: id,
         sample_status,
         follow_up_date: follow_up_date || null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", id).select().single();
+        updated_by: userId,
+      }]),
+      rfq.created_by
+        ? supabaseAdmin.from("users").select("email").eq("id", rfq.created_by).single()
+        : Promise.resolve({ data: null }),
+    ]).then(([, { data: spUser }]) => {
+      const salespersonEmail = spUser?.email;
 
-    if (error) return res.status(400).json({ success: false, message: error.message });
+      if (COORDINATOR_EMAIL) {
+        sendMailAsync(sampleUpdatedCoordinator({
+          coordinatorEmail: COORDINATOR_EMAIL,
+          sample: updated,
+          rfq,
+          updaterEmail: updaterEmail || COORDINATOR_EMAIL,
+        }));
+      }
+      if (salespersonEmail) {
+        sendMailAsync(sampleUpdatedSalesperson({
+          salespersonEmail,
+          sample: updated,
+          rfq,
+        }));
+      }
+    }).catch((e) => console.error("Post-update tasks error:", e.message));
 
-    // Write log
-    await supabaseAdmin.from("sample_logs").insert([{
-      sample_id: id,
-      sample_status,
-      follow_up_date: follow_up_date || null,
-      updated_by: userId,
-    }]);
-
-    // Get salesperson email
-    const rfq = current.rfqs || {};
-    const { data: spUser } = await supabaseAdmin
-      .from("users").select("email").eq("id", rfq.created_by).single();
-    const salespersonEmail = spUser?.email;
-
-    // Send emails
-    if (COORDINATOR_EMAIL) {
-      sendMail(sampleUpdatedCoordinator({
-        coordinatorEmail: COORDINATOR_EMAIL,
-        sample: data,
-        rfq,
-        updaterEmail: updaterEmail || COORDINATOR_EMAIL,
-      }));
-    }
-    if (salespersonEmail) {
-      sendMail(sampleUpdatedSalesperson({
-        salespersonEmail,
-        sample: data,
-        rfq,
-      }));
-    }
-
-    return res.json({ success: true, sample: data });
+    return res.json({ success: true, sample: updated });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

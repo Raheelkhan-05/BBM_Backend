@@ -1,39 +1,25 @@
+// routes/auth.routes.js
 import express from "express";
-
-import {
-  // login,
-  signup,
-  sendOtp,
-  verifyOtp,
-  assignRole
-} from "../controllers/auth.controller.js";
-import roleGuard from "../middleware/roleGuard.js";
-import authenticate from "../middleware/auth.js";
+import { signup, sendOtp, verifyOtp, assignRole } from "../controllers/auth.controller.js";
+import { getUsers, deleteUser, updateUser }        from "../controllers/users.controller.js";
+import authenticate  from "../middleware/auth.js";
+import roleGuard     from "../middleware/roleGuard.js";
 
 
-import {
-    getUsers,
-    deleteUser,
-    updateUser
-} from "../controllers/users.controller.js";
+const router     = express.Router();
+const adminOnly  = [authenticate, roleGuard(["Admin"])];
 
-const router = express.Router();
-const managerOnly = roleGuard(["Admin"]);
+// ── Public (no token required) ─────────────────────────────────────────────
+router.post("/signup",     signup);
+router.post("/send-otp",   sendOtp);
+router.post("/verify-otp", verifyOtp);
 
-// router.post("/signup", signup);
-// router.post("/login", login);
-
-// Public routes
-router.post("/signup",      signup);      // register profile + send first OTP
-router.post("/send-otp",    sendOtp);     // request / resend OTP (login page)
-router.post("/verify-otp",  verifyOtp);   // verify OTP → returns { token, user }
-
-// ADMIN ONLY
-// router.put("/assign-role", assignRole);
-router.post("/assign-role", authenticate, managerOnly, assignRole);
-
-router.get("/users", getUsers);
-router.delete("/users/:userId", deleteUser);
-router.put("/users/:userId", updateUser);
+// ── Admin only ─────────────────────────────────────────────────────────────
+// NOTE: getUsers, deleteUser, updateUser had NO auth guard before — anyone
+// on the internet could list/delete/modify your users. Fixed here.
+router.post  ("/assign-role",    ...adminOnly, assignRole);
+router.get   ("/users",          ...adminOnly, getUsers);
+router.delete("/users/:userId",  ...adminOnly, deleteUser);
+router.put   ("/users/:userId",  ...adminOnly, updateUser);
 
 export default router;
