@@ -153,3 +153,49 @@ export const updateQuotation = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// ═══════════════════════════════════════════════════════════════════
+// ADD THIS to your existing quotations.controller.js
+// (keep getQuotations, getQuotationLogs, updateQuotation exactly as-is,
+// just add this new export alongside them)
+// ═══════════════════════════════════════════════════════════════════
+
+const ACTIVE_QUOTATION_STATUSES_DUE = new Set([
+  "Pending",
+  "In Preparation",
+  "Sent to Customer",
+  "Under Review",
+]); // Accepted / Rejected are terminal — excluded from "due" list
+
+// GET /api/quotations/due
+// SalesCoordinator + Admin: ALL quotations not yet in a terminal status
+// (Accepted/Rejected) — past due, due today, and upcoming. Sorted by
+// follow_up_date ascending (nulls last) so nearest task shows first.
+export const getDueQuotations = async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("quotations")
+      .select(`
+        *,
+        rfqs(
+          id, company_name, product_category, product_sub_category,
+          product_name, quotation_description, product_description,
+          consumption_per_month, unit, existing_supplier_brand, created_by,
+          leads(company_name, primary_contact_name, city, primary_phone)
+        ),
+        users(id, email)
+      `)
+      .is("deleted_at", null)
+      .order("follow_up_date", { ascending: true, nullsFirst: false });
+
+    if (error) return res.status(400).json({ success: false, message: error.message });
+
+    const open = (data || []).filter(
+      (q) => !q.quotation_status || ACTIVE_QUOTATION_STATUSES_DUE.has(q.quotation_status)
+    );
+
+    return res.json({ success: true, quotations: open });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};

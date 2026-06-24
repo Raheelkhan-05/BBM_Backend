@@ -4,6 +4,7 @@
 import { sendMail } from "../config/mailer.js";
 import { rfqCreatedSalesperson, rfqCreatedCoordinator } from "../config/emailTemplates.js";
 import { createClient } from "@supabase/supabase-js";
+import { deriveNextAction } from "./followup-helpers.js";
 
 const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 const COORDINATOR_EMAIL = process.env.SALES_COORDINATOR_EMAIL;
@@ -416,4 +417,173 @@ export const updateQuotation = async (req, res) => {
     logQuotation(id, "updated", userId, { quotation_status, follow_up_date: follow_up_date || null });
     return res.json({ success: true, quotation: data });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+};
+
+
+
+const CLOSED_STATUSES = new Set(["Won", "Lost"]);
+const CLOSED_ACTIONS  = new Set(["Close Enquiry", "No Further Action"]);
+ 
+function isEnquiryClosedServer(followups) {
+  const active = (followups || []).filter((f) => !f.deleted_at);
+  if (!active.length) return false;
+  const latest = [...active].sort(
+    (a, b) => new Date(b.created_at) - new Date(a.created_at)
+  )[0];
+  return CLOSED_STATUSES.has(latest.enquiry_status) || CLOSED_ACTIONS.has(latest.next_action);
+}
+ 
+// ─────────────────────────────────────────────────────────────────────
+// GET /api/rfqs/followups/due
+// Salesperson: only their own rfqs (rfqs.created_by = me).
+// Admin: everyone's.
+// Returns ALL open enquiries (not closed: Won/Lost/Close Enquiry/No
+// Further Action) that have at least one followup with a date — past,
+// today, or future. Sorting/grouping (overdue first, completed last)
+// is handled client-side so the list can re-sort instantly as tasks
+// get resolved without a refetch.
+// ─────────────────────────────────────────────────────────────────────
+export const getDueFollowups = async (req, res) => {
+  try {
+    const { id: userId, role } = req.user;
+ 
+    let query = supabaseAdmin
+      .from("rfqs")
+      .select(`
+        id, lead_id, company_name, product_category, product_sub_category,
+        product_name, consumption_per_month, unit, target_price,
+        sample_required, quotation_required, created_by,
+        leads(company_name, primary_contact_name, primary_phone, primary_email, city, state),
+        rfq_followups(
+          id, contact_type, next_action, notes, followup_date,
+          target_price, enquiry_status, remark, created_at, deleted_at
+        )
+      `)
+      .is("deleted_at", null);
+ 
+    if (role !== "Admin") query = query.eq("created_by", userId);
+ 
+    const { data, error } = await query;
+    if (error) return res.status(400).json({ success: false, message: error.message });
+ 
+    const due = (data || [])
+      .map((rfq) => {
+        const fups = (rfq.rfq_followups || []).filter((f) => !f.deleted_at);
+        if (!fups.length) return null;
+        const latest = [...fups].sort(
+          (a, b) => new Date(b.created_at) - new Date(a.created_at)
+        )[0];
+        if (!latest.followup_date) return null;
+        if (isEnquiryClosedServer(fups)) return null; // closed — handled by separate "completed" logic client-side if ever needed
+        return { ...rfq, latest_followup: latest, rfq_followups: undefined };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.latest_followup.followup_date.localeCompare(b.latest_followup.followup_date));
+ 
+    return res.json({ success: true, tasks: due });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+ 
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/rfqs/:id/followups/resolve
+// Body: { outcome: "Won" | "Lost" | "Next", contact_type, remark,
+//         next_followup_date, next_followup_time, manual_next_action }
+//
+// - Won/Lost: writes a single followup row closing the enquiry.
+// - Next: writes a followup row with enquiry_status carried forward
+//   (kept "Open"/"In Progress" — not closed), next_action auto-derived
+//   from latest sample/quotation status (or manual_next_action if the
+//   rfq has neither sample nor quotation attached).
+// ─────────────────────────────────────────────────────────────────────
+export const resolveFollowup = async (req, res) => {
+  try {
+    const { id } = req.params; // rfq id
+    const { id: userId } = req.user;
+    const {
+      outcome,               // "Won" | "Lost" | "Next"
+      contact_type,
+      remark,
+      next_followup_date,
+      next_followup_time,
+      manual_next_action,
+    } = req.body;
+ 
+    if (!["Won", "Lost", "Next"].includes(outcome)) {
+      return res.status(400).json({ success: false, message: "Invalid outcome" });
+    }
+    if (!contact_type) {
+      return res.status(400).json({ success: false, message: "contact_type is required" });
+    }
+ 
+    // Fetch rfq + latest sample + latest quotation for next-action derivation
+    const [{ data: rfq, error: rfqErr }, { data: sampleRows }, { data: quoteRows }] = await Promise.all([
+      supabaseAdmin
+        .from("rfqs")
+        .select("id, sample_required, quotation_required")
+        .eq("id", id)
+        .single(),
+      supabaseAdmin
+        .from("samples")
+        .select("sample_status, updated_at")
+        .eq("rfq_id", id)
+        .is("deleted_at", null)
+        .order("updated_at", { ascending: false })
+        .limit(1),
+      supabaseAdmin
+        .from("quotations")
+        .select("quotation_status, updated_at")
+        .eq("rfq_id", id)
+        .is("deleted_at", null)
+        .order("updated_at", { ascending: false })
+        .limit(1),
+    ]);
+ 
+    if (rfqErr || !rfq) {
+      return res.status(404).json({ success: false, message: "Enquiry not found" });
+    }
+ 
+    let payload;
+    if (outcome === "Won" || outcome === "Lost") {
+      payload = {
+        rfq_id: id,
+        contact_type,
+        enquiry_status: outcome,
+        next_action: null,
+        remark: remark || null,
+        followup_date: new Date().toISOString().slice(0, 10),
+        created_by: userId,
+      };
+    } else {
+      if (!next_followup_date) {
+        return res.status(400).json({ success: false, message: "next_followup_date is required" });
+      }
+      const derived = deriveNextAction(rfq, sampleRows?.[0] || null, quoteRows?.[0] || null);
+      payload = {
+        rfq_id: id,
+        contact_type,
+        enquiry_status: "In Progress",
+        next_action: derived || manual_next_action || null,
+        remark: remark || null,
+        followup_date: next_followup_date,
+        notes: next_followup_time ? `[Time: ${next_followup_time}]` : null,
+        created_by: userId,
+      };
+    }
+ 
+    const { data: followup, error: insertErr } = await supabaseAdmin
+      .from("rfq_followups")
+      .insert([payload])
+      .select()
+      .single();
+ 
+    if (insertErr) {
+      return res.status(400).json({ success: false, message: insertErr.message });
+    }
+ 
+    return res.json({ success: true, followup });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
 };

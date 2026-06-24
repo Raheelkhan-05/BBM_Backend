@@ -133,3 +133,45 @@ export const updateSample = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+
+
+const ACTIVE_SAMPLE_STATUSES_DUE = new Set([
+  "Pending",
+  "Sent to Customer",
+  "Received from Customer",
+]); // Approved / Rejected are terminal — excluded from "due" list
+ 
+// GET /api/samples/due
+// SalesCoordinator + Admin: ALL samples not yet in a terminal status
+// (Approved/Rejected) — past due, due today, and upcoming. Sorted by
+// follow_up_date ascending (nulls last) so nearest task shows first;
+// resolved/terminal items are excluded here and surfaced separately
+// by the frontend once acted on, for the "completed" section.
+export const getDueSamples = async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("samples")
+      .select(`
+        *,
+        rfqs(
+          id, company_name, product_category, product_sub_category,
+          product_name, sample_description, product_description,
+          consumption_per_month, unit, existing_supplier_brand, created_by,
+          leads(company_name, primary_contact_name, city, primary_phone)
+        ),
+        users(id, email)
+      `)
+      .is("deleted_at", null)
+      .order("follow_up_date", { ascending: true, nullsFirst: false });
+ 
+    if (error) return res.status(400).json({ success: false, message: error.message });
+ 
+    const open = (data || []).filter(
+      (s) => !s.sample_status || ACTIVE_SAMPLE_STATUSES_DUE.has(s.sample_status)
+    );
+ 
+    return res.json({ success: true, samples: open });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
