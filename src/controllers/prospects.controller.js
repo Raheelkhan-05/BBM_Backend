@@ -11,8 +11,7 @@ const supabaseAdmin = createClient(
 const sendMailAsync = (opts) =>
   sendMail(opts).catch((e) => console.error("Mail error:", e.message));
 
-// Always supply an explicit UTC timestamp so it doesn't rely on DB default
-const nowUTC = () => new Date().toISOString(); // e.g. "2024-06-15T09:32:11.000Z"
+const nowUTC = () => new Date().toISOString();
 
 function logProspect(prospectId, action, changedBy, snapshot = {}) {
   supabaseAdmin
@@ -21,7 +20,7 @@ function logProspect(prospectId, action, changedBy, snapshot = {}) {
       prospect_id: prospectId,
       action,
       changed_by: changedBy,
-      changed_at: nowUTC(),   // explicit UTC — fixes timezone drift
+      changed_at: nowUTC(),
       ...snapshot,
     }])
     .then(({ error }) => {
@@ -29,26 +28,40 @@ function logProspect(prospectId, action, changedBy, snapshot = {}) {
     });
 }
 
+// ── extractProspectFields ─────────────────────────────────────
+// Includes contact_name, contact_designation, contact_email,
+// contact_phone so they are persisted and returned by
+// GET /api/prospects, enabling the frontend to pre-fill all
+// four primary contact fields when converting a prospect to a lead.
 function extractProspectFields(body) {
   const {
     company_name, industry, country, state, city, zone, route,
     source, next_action, next_action_date, feedback, prospect_status,
+    contact_name, contact_designation, contact_email, contact_phone,
   } = body;
   return {
     company_name,
     industry,
-    country:          country          || "India",
-    state:            state            || null,
-    city:             city             || null,
-    zone:             zone             || null,
-    route:            route            || null,
-    source:           source           || null,
-    next_action:      next_action      || null,
-    next_action_date: next_action_date || null,
-    feedback:         feedback         || null,
-    prospect_status:  prospect_status  || null,
+    country:              country              || "India",
+    state:                state                || null,
+    city:                 city                 || null,
+    zone:                 zone                 || null,
+    route:                route                || null,
+    source:               source               || null,
+    next_action:          next_action          || null,
+    next_action_date:     next_action_date     || null,
+    feedback:             feedback             || null,
+    prospect_status:      prospect_status      || null,
+    // Contact details — all four fields pre-fill primary contact on lead conversion
+    contact_name:         contact_name         || null,
+    contact_designation:  contact_designation  || null,
+    contact_email:        contact_email        || null,
+    contact_phone:        contact_phone        || null,
   };
 }
+
+const CONTACT_SELECT =
+  "contact_name, contact_designation, contact_email, contact_phone";
 
 export const getProspects = async (req, res) => {
   try {
@@ -72,7 +85,11 @@ export const getMyProspects = async (req, res) => {
     const { id: userId } = req.user;
     const { data, error } = await supabaseAdmin
       .from("prospects")
-      .select("id, company_name, industry, city, zone, route, state, country, source, next_action, next_action_date, feedback, prospect_status")
+      .select(
+        "id, company_name, industry, city, zone, route, state, country, source, " +
+        "next_action, next_action_date, feedback, prospect_status, " +
+        CONTACT_SELECT
+      )
       .is("deleted_at", null)
       .eq("created_by", userId)
       .order("company_name", { ascending: true });
@@ -139,10 +156,13 @@ export const deleteProspect = async (req, res) => {
     const { id } = req.params;
     const { id: userId, role } = req.user;
 
-    // Fetch snapshot before soft-delete so we can log what existed
     const { data: existing } = await supabaseAdmin
       .from("prospects")
-      .select("company_name, industry, country, state, city, zone, route, source, next_action, next_action_date, feedback, prospect_status")
+      .select(
+        "company_name, industry, country, state, city, zone, route, source, " +
+        "next_action, next_action_date, feedback, prospect_status, " +
+        CONTACT_SELECT
+      )
       .eq("id", id)
       .single();
 
@@ -160,7 +180,6 @@ export const deleteProspect = async (req, res) => {
       return res.status(400).json({ success: false, message: error.message });
     }
 
-    // Log with last-known snapshot so the audit trail shows what was deleted
     logProspect(id, "deleted", userId, existing || {});
     return res.json({ success: true, message: "Prospect deleted" });
   } catch (err) {
