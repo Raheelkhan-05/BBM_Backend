@@ -474,7 +474,7 @@ export const getDueFollowups = async (req, res) => {
           (a, b) => new Date(b.created_at) - new Date(a.created_at)
         )[0];
         if (!latest.followup_date) return null;
-        if (isEnquiryClosedServer(fups)) return null; // closed — handled by separate "completed" logic client-side if ever needed
+        // if (isEnquiryClosedServer(fups)) return null; // closed — handled by separate "completed" logic client-side if ever needed
         return { ...rfq, latest_followup: latest, rfq_followups: undefined };
       })
       .filter(Boolean)
@@ -564,7 +564,7 @@ export const resolveFollowup = async (req, res) => {
         rfq_id: id,
         contact_type,
         enquiry_status: "In Progress",
-        next_action: derived || manual_next_action || null,
+        next_action: manual_next_action || derived || null,
         remark: remark || null,
         followup_date: next_followup_date,
         notes: next_followup_time ? `[Time: ${next_followup_time}]` : null,

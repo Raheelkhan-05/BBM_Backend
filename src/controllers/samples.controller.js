@@ -166,11 +166,7 @@ export const getDueSamples = async (req, res) => {
  
     if (error) return res.status(400).json({ success: false, message: error.message });
  
-    const open = (data || []).filter(
-      (s) => !s.sample_status || ACTIVE_SAMPLE_STATUSES_DUE.has(s.sample_status)
-    );
- 
-    return res.json({ success: true, samples: open });
+    return res.json({ success: true, samples: data || [] });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

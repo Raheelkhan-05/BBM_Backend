@@ -190,11 +190,7 @@ export const getDueQuotations = async (req, res) => {
 
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    const open = (data || []).filter(
-      (q) => !q.quotation_status || ACTIVE_QUOTATION_STATUSES_DUE.has(q.quotation_status)
-    );
-
-    return res.json({ success: true, quotations: open });
+    return res.json({ success: true, quotations: data || [] });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
