@@ -82,9 +82,15 @@ export const updateSample = async (req, res) => {
         .from("samples")
         .update({
           sample_status,
+          result: req.body.result || null,
+          priority: req.body.priority || null,
           follow_up_date: follow_up_date || null,
+          description:    req.body.description    || null,
+          reject_reason:  req.body.reject_reason  || null,
+          follow_up_time: req.body.follow_up_time || null,
+          notes:          req.body.notes          || null,
           updated_at: new Date().toISOString(),
-        })
+      })
         .eq("id", id)
         .select()
         .single(),
@@ -102,6 +108,12 @@ export const updateSample = async (req, res) => {
       supabaseAdmin.from("sample_logs").insert([{
         sample_id: id,
         sample_status,
+        result: req.body.result || null,
+        priority: req.body.priority || null,
+        description:    req.body.description    || null,
+        reject_reason:  req.body.reject_reason  || null,
+        follow_up_time: req.body.follow_up_time || null,
+        notes:          req.body.notes          || null,
         follow_up_date: follow_up_date || null,
         updated_by: userId,
       }]),

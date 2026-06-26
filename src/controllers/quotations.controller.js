@@ -97,12 +97,18 @@ export const updateQuotation = async (req, res) => {
         .eq("id", id)
         .single(),
       supabaseAdmin
-        .from("quotations")
-        .update({
-          quotation_status,
-          follow_up_date: follow_up_date || null,
-          updated_at: new Date().toISOString(),
-        })
+      .from("quotations")
+      .update({
+        quotation_status,
+        result: req.body.result || null,
+        priority: req.body.priority || null,
+        description:    req.body.description    || null,
+        reject_reason:  req.body.reject_reason  || null,
+        follow_up_time: req.body.follow_up_time || null,
+        notes:          req.body.notes          || null,
+        follow_up_date: follow_up_date || null,
+        updated_at: new Date().toISOString(),
+      })
         .eq("id", id)
         .select()
         .single(),
@@ -121,6 +127,12 @@ export const updateQuotation = async (req, res) => {
       supabaseAdmin.from("quotation_logs").insert([{
         quotation_id: id,
         quotation_status,
+        result: req.body.result || null,
+        priority: req.body.priority || null,
+        description:    req.body.description    || null,
+        reject_reason:  req.body.reject_reason  || null,
+        follow_up_time: req.body.follow_up_time || null,
+        notes:          req.body.notes          || null,
         follow_up_date: follow_up_date || null,
         updated_by: userId,
       }]),

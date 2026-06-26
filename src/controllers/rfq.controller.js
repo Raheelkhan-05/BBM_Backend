@@ -81,10 +81,10 @@ export const getRFQs = async (req, res) => {
   try {
     const { id: userId, role } = req.user;
     let query = supabaseAdmin.from("rfqs").select(`
-      *, leads(id, company_name, primary_contact_name, city, country, state),
+      *, leads(id, company_name, primary_contact_name, primary_phone, primary_email, city, country, state),
       users(id, email, role), rfq_followups(*),
-      samples(id, sample_status, follow_up_date, updated_at),
-      quotations(id, quotation_status, follow_up_date, updated_at)
+      samples(id, sample_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at),
+      quotations(id, quotation_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at)
     `).is("deleted_at", null).order("created_at", { ascending: false });
     if (role !== "Admin") query = query.eq("created_by", userId);
     const { data, error } = await query;
@@ -380,10 +380,23 @@ export const updateSample = async (req, res) => {
   try {
     const { id } = req.params;
     const { id: userId, role } = req.user;
-    const { sample_status, follow_up_date } = req.body;
+    const {
+      sample_status, follow_up_date, follow_up_time,
+      result, priority, notes, description, reject_reason,
+    } = req.body;
 
     let query = supabaseAdmin.from("samples")
-      .update({ sample_status, follow_up_date: follow_up_date || null, updated_at: nowUTC() })
+      .update({
+        sample_status,
+        follow_up_date:  follow_up_date  || null,
+        follow_up_time:  follow_up_time  || null,
+        result:          result          || null,
+        priority:        priority        || null,
+        notes:           notes           || null,
+        description:     description     || null,
+        reject_reason:   reject_reason   || null,
+        updated_at:      nowUTC(),
+      })
       .eq("id", id);
     if (role !== "Admin") query = query.eq("created_by", userId);
 
@@ -392,7 +405,16 @@ export const updateSample = async (req, res) => {
       if (error.code === "PGRST116") return res.status(404).json({ success: false, message: "Sample not found" });
       return res.status(400).json({ success: false, message: error.message });
     }
-    logSample(id, "updated", userId, { sample_status, follow_up_date: follow_up_date || null });
+    logSample(id, "updated", userId, {
+      sample_status,
+      follow_up_date:  follow_up_date  || null,
+      follow_up_time:  follow_up_time  || null,
+      result:          result          || null,
+      priority:        priority        || null,
+      notes:           notes           || null,
+      description:     description     || null,
+      reject_reason:   reject_reason   || null,
+    });
     return res.json({ success: true, sample: data });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
 };
@@ -402,10 +424,23 @@ export const updateQuotation = async (req, res) => {
   try {
     const { id } = req.params;
     const { id: userId, role } = req.user;
-    const { quotation_status, follow_up_date } = req.body;
+    const {
+      quotation_status, follow_up_date, follow_up_time,
+      result, priority, notes, description, reject_reason,
+    } = req.body;
 
     let query = supabaseAdmin.from("quotations")
-      .update({ quotation_status, follow_up_date: follow_up_date || null, updated_at: nowUTC() })
+      .update({
+        quotation_status,
+        follow_up_date:  follow_up_date  || null,
+        follow_up_time:  follow_up_time  || null,
+        result:          result          || null,
+        priority:        priority        || null,
+        notes:           notes           || null,
+        description:     description     || null,
+        reject_reason:   reject_reason   || null,
+        updated_at:      nowUTC(),
+      })
       .eq("id", id);
     if (role !== "Admin") query = query.eq("created_by", userId);
 
@@ -414,12 +449,19 @@ export const updateQuotation = async (req, res) => {
       if (error.code === "PGRST116") return res.status(404).json({ success: false, message: "Quotation not found" });
       return res.status(400).json({ success: false, message: error.message });
     }
-    logQuotation(id, "updated", userId, { quotation_status, follow_up_date: follow_up_date || null });
+    logQuotation(id, "updated", userId, {
+      quotation_status,
+      follow_up_date:  follow_up_date  || null,
+      follow_up_time:  follow_up_time  || null,
+      result:          result          || null,
+      priority:        priority        || null,
+      notes:           notes           || null,
+      description:     description     || null,
+      reject_reason:   reject_reason   || null,
+    });
     return res.json({ success: true, quotation: data });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
 };
-
-
 
 const CLOSED_STATUSES = new Set(["Won", "Lost"]);
 const CLOSED_ACTIONS  = new Set(["Close Enquiry", "No Further Action"]);
