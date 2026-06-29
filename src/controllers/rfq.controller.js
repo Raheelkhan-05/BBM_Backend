@@ -86,7 +86,11 @@ export const getRFQs = async (req, res) => {
       samples(id, sample_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at),
       quotations(id, quotation_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at)
     `).is("deleted_at", null).order("created_at", { ascending: false });
-    if (role !== "Admin") query = query.eq("created_by", userId);
+    if (role === "Admin" || role === "SalesCoordinator") {
+      // no filter — SC needs all RFQs across all salespersons
+    } else {
+      query = query.eq("created_by", userId);
+    }
     const { data, error } = await query;
     if (error) return res.status(400).json({ success: false, message: error.message });
     return res.json({ success: true, rfqs: data });
@@ -398,7 +402,7 @@ export const updateSample = async (req, res) => {
         updated_at:      nowUTC(),
       })
       .eq("id", id);
-    if (role !== "Admin") query = query.eq("created_by", userId);
+    if (role !== "Admin" && role !== "SalesCoordinator") query = query.eq("created_by", userId);
 
     const { data, error } = await query.select().single();
     if (error) {
@@ -442,7 +446,7 @@ export const updateQuotation = async (req, res) => {
         updated_at:      nowUTC(),
       })
       .eq("id", id);
-    if (role !== "Admin") query = query.eq("created_by", userId);
+    if (role !== "Admin" && role !== "SalesCoordinator") query = query.eq("created_by", userId);
 
     const { data, error } = await query.select().single();
     if (error) {

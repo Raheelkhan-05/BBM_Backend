@@ -71,7 +71,11 @@ export const getProspects = async (req, res) => {
       .select("*, users(id, email, role)")
       .is("deleted_at", null)
       .order("created_at", { ascending: false });
-    if (role !== "Admin") query = query.eq("created_by", userId);
+    if (role === "SalesCoordinator") {
+      return res.json({ success: true, prospects: [] }); // SC never sees prospects
+    } else if (role !== "Admin") {
+      query = query.eq("created_by", userId);
+    }
     const { data, error } = await query;
     if (error) return res.status(400).json({ success: false, message: error.message });
     return res.json({ success: true, prospects: data });
