@@ -1,7 +1,7 @@
 // routes/auth.routes.js
 import express from "express";
 import { signup, sendOtp, verifyOtp, assignRole } from "../controllers/auth.controller.js";
-import { getUsers, deleteUser, updateUser }        from "../controllers/users.controller.js";
+import { getUsers, deleteUser, updateUser, adminCreateUser }        from "../controllers/users.controller.js";
 import authenticate  from "../middleware/auth.js";
 import roleGuard     from "../middleware/roleGuard.js";
 
@@ -17,6 +17,7 @@ router.post("/verify-otp", verifyOtp);
 // ── Admin only ─────────────────────────────────────────────────────────────
 // NOTE: getUsers, deleteUser, updateUser had NO auth guard before — anyone
 // on the internet could list/delete/modify your users. Fixed here.
+router.post  ("/admin/create-user",  ...adminOnly, adminCreateUser);
 router.post  ("/assign-role",    ...adminOnly, assignRole);
 router.get   ("/users",          ...adminOnly, getUsers);
 router.delete("/users/:userId",  ...adminOnly, deleteUser);

@@ -155,38 +155,94 @@ const createSupabaseSession = async (email) => {
 // ── POST /api/auth/signup ─────────────────────────────────────────────────
 export const signup = async (req, res) => {
   try {
-    const { email, first_name, last_name, phone } = req.body;
+    const { email, first_name, last_name, phone, role } = req.body;
 
-    if (!email || !first_name || !last_name) {
-      return res.status(400).json({
-        success: false,
-        message: "Email, first name and last name are required.",
-      });
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required." });
     }
 
     const cleanEmail = email.toLowerCase().trim();
 
-    // Check for duplicate + generate OTP code in parallel
-    const [{ data: existing }, code] = await Promise.all([
-      supabaseAdmin.from("users").select("id").eq("email", cleanEmail).maybeSingle(),
-      Promise.resolve(makeOtpCode()),
-    ]);
+    // Check if user row already exists (active or inactive)
+    const { data: existing } = await supabaseAdmin
+      .from("users")
+      .select("id, is_active")
+      .eq("email", cleanEmail)
+      .maybeSingle();
 
     if (existing) {
+      if (existing.is_active === false) {
+        // ── REACTIVATION PATH ──────────────────────────────────────────
+        // Supabase auth user was deleted — recreate it with the SAME users table id
+        // First try to create fresh auth entry
+        const { data: authData, error: authError } =
+          await supabaseAdmin.auth.admin.createUser({
+            email:         cleanEmail,
+            email_confirm: true,
+            user_metadata: {
+              first_name: first_name?.trim() || "",
+              last_name:  last_name?.trim()  || "",
+            },
+          });
+
+        if (authError) {
+          // Auth user might still exist from a partial previous deactivation
+          // Try to find and update it instead
+          const { data: listData } = await supabaseAdmin.auth.admin.listUsers();
+          const existingAuthUser = listData?.users?.find(u => u.email === cleanEmail);
+
+          if (!existingAuthUser) {
+            return res.status(400).json({ success: false, message: authError.message });
+          }
+
+          // Update the users table to point to the existing auth id and reactivate
+          await supabaseAdmin
+            .from("users")
+            .update({
+              id:         existingAuthUser.id,
+              is_active:  true,          // ← was false (bug fix)
+              role:       "UNASSIGNED",  // needs admin to re-approve
+              first_name: first_name?.trim() || "",
+              last_name:  last_name?.trim()  || "",
+              phone:      phone?.trim()      || null,
+            })
+            .eq("email", cleanEmail);
+        } else {
+          // Fresh auth user created — update users table with new auth id
+          await supabaseAdmin
+            .from("users")
+            .update({
+              id:         authData.user.id,
+              is_active:  true,          // ← was false (bug fix)
+              role:       "UNASSIGNED",  // needs admin to re-approve
+              first_name: first_name?.trim() || "",
+              last_name:  last_name?.trim()  || "",
+              phone:      phone?.trim()      || null,
+            })
+            .eq("email", cleanEmail);
+        }
+
+        return res.status(201).json({
+          success: true,
+          message: "Account re-registered. Awaiting admin approval before you can sign in.",
+        });
+      }
+
+      // Active user already exists
       return res.status(409).json({
         success: false,
         message: "An account with this email already exists. Please sign in.",
       });
     }
 
-    // Create auth user
+    // ── NEW USER PATH ──────────────────────────────────────────────────
     const { data: authData, error: authError } =
       await supabaseAdmin.auth.admin.createUser({
         email:         cleanEmail,
         email_confirm: true,
         user_metadata: {
-          first_name: first_name.trim(),
-          last_name:  last_name.trim(),
+          first_name: first_name?.trim() || "",
+          last_name:  last_name?.trim()  || "",
         },
       });
 
@@ -194,33 +250,25 @@ export const signup = async (req, res) => {
       return res.status(400).json({ success: false, message: authError.message });
     }
 
-    const authUser = authData.user;
-
-    // Insert profile row + store OTP in parallel
-    const [{ error: dbError }] = await Promise.all([
-      supabaseAdmin.from("users").insert([{
-        id:         authUser.id,
-        email:      cleanEmail,
-        first_name: first_name.trim(),
-        last_name:  last_name.trim(),
-        phone:      phone?.trim() || null,
-        role:       "UNASSIGNED",
-      }]),
-      storeOtp(cleanEmail, code),
-    ]);
+    const { error: dbError } = await supabaseAdmin.from("users").insert([{
+      id:         authData.user.id,
+      email:      cleanEmail,
+      first_name: first_name?.trim() || "",
+      last_name:  last_name?.trim()  || "",
+      phone:      phone?.trim()      || null,
+      role:       role || "UNASSIGNED",
+      is_active:  true,
+    }]);
 
     if (dbError) {
       // Rollback auth user if profile insert failed
-      await supabaseAdmin.auth.admin.deleteUser(authUser.id);
+      await supabaseAdmin.auth.admin.deleteUser(authData.user.id);
       return res.status(400).json({ success: false, message: dbError.message });
     }
 
-    // Fire-and-forget — don't make the user wait for SMTP
-    sendMail(otpEmail({ email: cleanEmail, name: first_name.trim(), token: code }));
-
     return res.status(201).json({
       success: true,
-      message: "Account created! A 6-digit verification code has been sent to your email.",
+      message: "Account created. The user can now sign in with OTP.",
     });
   } catch (err) {
     console.error("signup error:", err);
@@ -291,6 +339,8 @@ export const verifyOtp = async (req, res) => {
         supabaseAdmin.from("users").select("*").eq("email", cleanEmail).maybeSingle(),
       ]);
 
+      
+
     if (otpFetchError) {
       return res.status(500).json({ success: false, message: "Database error. Please try again." });
     }
@@ -303,6 +353,14 @@ export const verifyOtp = async (req, res) => {
     if (userError || !userData) {
       return res.status(400).json({ success: false, message: "User profile not found." });
     }
+
+    if (!userData.is_active) {
+      return res.status(403).json({
+        success: false,
+        message: "Your account has been deactivated. Please contact your administrator.",
+      });
+    }
+
 
     if (!userData.role || userData.role === "UNASSIGNED") {
       return res.status(403).json({
