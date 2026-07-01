@@ -83,8 +83,8 @@ export const getRFQs = async (req, res) => {
     let query = supabaseAdmin.from("rfqs").select(`
       *, leads(id, company_name, primary_contact_name, primary_phone, primary_email, city, country, state),
       users(id, email, role), rfq_followups(*),
-      samples(id, sample_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at),
-      quotations(id, quotation_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at)
+      samples(id, sample_code, sample_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at),
+      quotations(id, quotation_code, quotation_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at)
     `).is("deleted_at", null).order("created_at", { ascending: false });
     if (role === "Admin" || role === "SalesCoordinator") {
       // no filter — SC needs all RFQs across all salespersons
