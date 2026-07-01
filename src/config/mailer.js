@@ -1,4 +1,8 @@
-//mailer.js
+// config/mailer.js
+//
+// Same as before, plus optional `attachments` support (needed for the
+// daily PDF report). Existing calls to sendMail({to, subject, html, headers})
+// keep working unchanged.
 
 import nodemailer from "nodemailer";
 
@@ -12,7 +16,7 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-export const sendMail = async ({ to, subject, html, headers }) => {
+export const sendMail = async ({ to, subject, html, headers, attachments }) => {
   try {
     await transporter.sendMail({
       from: process.env.SMTP_FROM,
@@ -20,8 +24,9 @@ export const sendMail = async ({ to, subject, html, headers }) => {
       subject,
       html,
       // Threading headers (In-Reply-To, References, Message-ID).
-      // Nodemailer accepts them as a plain object here.
       ...(headers ? { headers } : {}),
+      // e.g. [{ filename: "report.pdf", content: bufferOrBase64, contentType: "application/pdf" }]
+      ...(attachments ? { attachments } : {}),
     });
   } catch (err) {
     console.error("Mail error:", err.message);
