@@ -23,12 +23,11 @@ export const getDashboard = async (req, res) => {
     // We only run queries the role actually needs — no wasted DB work.
     const tasks = [];
 
-    // Leads — Admin sees all, Salesperson sees own
-    if (isAdmin || isSP) {
+    // Leads — Admin sees all, Salesperson + SalesCoordinator see own
+    if (isAdmin || isSP || isSC) {
       let q = supabaseAdmin
         .from("leads")
         .select(
-          // Only the columns Dashboard actually uses — skip heavy unused fields
           "id, company_name, city, nature_of_business, created_at, created_by"
         )
         .is("deleted_at", null)
@@ -38,7 +37,7 @@ export const getDashboard = async (req, res) => {
     }
 
     // RFQs — lighter select; followups as a separate slim query
-    if (isAdmin || isSP) {
+    if (isAdmin || isSP || isSC) {
       let q = supabaseAdmin
         .from("rfqs")
         .select(
@@ -49,7 +48,6 @@ export const getDashboard = async (req, res) => {
       if (!isAdmin) q = q.eq("created_by", userId);
       tasks.push(["rfqs", q]);
 
-      // Followups — only need rfq_id, enquiry_status, created_at for win-rate calc
       let fq = supabaseAdmin
         .from("rfq_followups")
         .select("id, rfq_id, enquiry_status, created_at")
@@ -77,28 +75,26 @@ export const getDashboard = async (req, res) => {
       ]);
     }
 
-    // Samples — Admin + SalesCoordinator
+    // Samples — Admin sees all, SalesCoordinator sees own
     if (isAdmin || isSC) {
-      tasks.push([
-        "samples",
-        supabaseAdmin
-          .from("samples")
-          .select("id, sample_status, follow_up_date, created_at")
-          .is("deleted_at", null)
-          .order("created_at", { ascending: false }),
-      ]);
+      let q = supabaseAdmin
+        .from("samples")
+        .select("id, sample_status, follow_up_date, created_at, created_by")
+        .is("deleted_at", null)
+        .order("created_at", { ascending: false });
+      if (isSC) q = q.eq("created_by", userId);
+      tasks.push(["samples", q]);
     }
 
-    // Quotations — Admin + SalesCoordinator
+    // Quotations — Admin sees all, SalesCoordinator sees own
     if (isAdmin || isSC) {
-      tasks.push([
-        "quotations",
-        supabaseAdmin
-          .from("quotations")
-          .select("id, quotation_status, follow_up_date, created_at")
-          .is("deleted_at", null)
-          .order("created_at", { ascending: false }),
-      ]);
+      let q = supabaseAdmin
+        .from("quotations")
+        .select("id, quotation_status, follow_up_date, created_at, created_by")
+        .is("deleted_at", null)
+        .order("created_at", { ascending: false });
+      if (isSC) q = q.eq("created_by", userId);
+      tasks.push(["quotations", q]);
     }
 
     // Users — Admin only
@@ -111,8 +107,8 @@ export const getDashboard = async (req, res) => {
       ]);
     }
 
-    // Prospects — Admin + Salesperson
-    if (isAdmin || isSP) {
+    // Prospects — Admin + Salesperson + SalesCoordinator (own only for non-Admin)
+    if (isAdmin || isSP || isSC) {
       let q = supabaseAdmin
         .from("prospects")
         .select(
