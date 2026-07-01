@@ -6,7 +6,7 @@ import { getRoutes, createRoute, updateRoute, deleteRoute } from "../controllers
 const router = express.Router();
 router.use(authenticate);
 
-const adminOnly = roleGuard(["Admin"]);
+const adminOnly = roleGuard(["Admin","SalesCoordinator"]);  // SalesCoordinator can manage routes for their team
 
 router.get("/", getRoutes);
 router.post("/", createRoute);          // all roles — salesperson creates while filling lead
