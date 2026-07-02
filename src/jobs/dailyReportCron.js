@@ -12,7 +12,7 @@ import { sendDailyReport } from "../services/sendDailyReport.js";
 
 // "0 19 * * *" = minute 0, hour 19 (7 PM), every day
 cron.schedule(
-  "19 17 * * *",
+  "21 17 * * *",
   async () => {
     console.log("[dailyReportCron] Running 7pm daily report job…");
     try {
