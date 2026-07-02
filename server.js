@@ -14,6 +14,7 @@ import auth from "./src/middleware/auth.js";
 import dashboardRoutes from "./src/routes/dashboard.routes.js";
 import "./src/jobs/dailyReportCron.js";
 import reportsRoutes from "./src/routes/reports.routes.js";
+import purgeRoutes from "./src/routes/purge.routes.js";
 
 dotenv.config();
 
@@ -33,6 +34,7 @@ app.use("/api/samples", samplesRouter);
 app.use("/api/quotations", quotationsRouter);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/reports", reportsRoutes); 
+app.use("/api/purge", purgeRoutes);
 app.get("/api/me", auth, (req, res) => {
   res.json({
     id: req.user.id,

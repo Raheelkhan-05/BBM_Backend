@@ -28,11 +28,6 @@ function logProspect(prospectId, action, changedBy, snapshot = {}) {
     });
 }
 
-// ── extractProspectFields ─────────────────────────────────────
-// Includes contact_name, contact_designation, contact_email,
-// contact_phone so they are persisted and returned by
-// GET /api/prospects, enabling the frontend to pre-fill all
-// four primary contact fields when converting a prospect to a lead.
 function extractProspectFields(body) {
   const {
     company_name, industry, country, state, city, zone, route,
@@ -52,7 +47,6 @@ function extractProspectFields(body) {
     next_action_date:     next_action_date     || null,
     feedback:             feedback             || null,
     prospect_status:      prospect_status      || null,
-    // Contact details — all four fields pre-fill primary contact on lead conversion
     contact_name:         contact_name         || null,
     contact_designation:  contact_designation  || null,
     contact_email:        contact_email        || null,
@@ -63,18 +57,25 @@ function extractProspectFields(body) {
 const CONTACT_SELECT =
   "contact_name, contact_designation, contact_email, contact_phone";
 
+// Creator + last-updater, both embedded via explicit FK names since
+// prospects now has two FKs into users (created_by, updated_by).
+const WITH_CREATOR_UPDATER =
+  "*, creator:users!prospects_created_by_fkey(id, email, first_name, last_name), " +
+  "updater:users!prospects_updated_by_fkey(id, email, first_name, last_name)";
+
+// ── GET /api/prospects ──────────────────────────────────────────────────
+// TEAM VISIBILITY: everyone on the team sees every prospect (there's one
+// team today). The "Mine" vs "Team" split is a client-side filter — the
+// frontend decides what to show by default, using created_by/updated_by
+// against the logged-in user's id. This endpoint just returns everything
+// non-deleted so that filter has data to work with.
 export const getProspects = async (req, res) => {
   try {
-    const { id: userId, role } = req.user;
-    let query = supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from("prospects")
-      .select("*, users(id, email, role)")
+      .select(WITH_CREATOR_UPDATER)
       .is("deleted_at", null)
       .order("created_at", { ascending: false });
-    if (role !== "Admin") {
-      query = query.eq("created_by", userId); // SC now sees their own prospects too
-    }
-    const { data, error } = await query;
     if (error) return res.status(400).json({ success: false, message: error.message });
     return res.json({ success: true, prospects: data });
   } catch (err) {
@@ -89,7 +90,7 @@ export const getMyProspects = async (req, res) => {
       .from("prospects")
       .select(
         "id, company_name, industry, city, zone, route, state, country, source, " +
-        "next_action, next_action_date, feedback, prospect_status, " +
+        "next_action, next_action_date, feedback, prospect_status, updated_by, " +
         CONTACT_SELECT
       )
       .is("deleted_at", null)
@@ -111,8 +112,13 @@ export const createProspect = async (req, res) => {
 
     const { data, error } = await supabaseAdmin
       .from("prospects")
-      .insert([{ ...fields, company_name: fields.company_name.trim(), created_by: userId }])
-      .select()
+      .insert([{
+        ...fields,
+        company_name: fields.company_name.trim(),
+        created_by: userId,
+        updated_by: userId, // creator is the first "updater" too
+      }])
+      .select(WITH_CREATOR_UPDATER)
       .single();
     if (error) return res.status(400).json({ success: false, message: error.message });
 
@@ -127,22 +133,29 @@ export const createProspect = async (req, res) => {
 export const updateProspect = async (req, res) => {
   try {
     const { id } = req.params;
-    const { id: userId, role } = req.user;
+    const { id: userId } = req.user;
     const fields = extractProspectFields(req.body);
     if (!fields.company_name?.trim())
       return res.status(400).json({ success: false, message: "Company name is required" });
 
-    let query = supabaseAdmin
+    // Team model: anyone on the team can update — ownership no longer
+    // restricts who can act on a record, only who's shown as having
+    // created/last-touched it.
+    const { data, error } = await supabaseAdmin
       .from("prospects")
-      .update({ ...fields, company_name: fields.company_name.trim(), updated_at: nowUTC() })
+      .update({
+        ...fields,
+        company_name: fields.company_name.trim(),
+        updated_by: userId,
+        updated_at: nowUTC(),
+      })
       .eq("id", id)
-      .is("deleted_at", null);
-    if (role !== "Admin") query = query.eq("created_by", userId);
-
-    const { data, error } = await query.select().single();
+      .is("deleted_at", null)
+      .select(WITH_CREATOR_UPDATER)
+      .single();
     if (error) {
       if (error.code === "PGRST116")
-        return res.status(404).json({ success: false, message: "Prospect not found or not authorized" });
+        return res.status(404).json({ success: false, message: "Prospect not found" });
       return res.status(400).json({ success: false, message: error.message });
     }
 
@@ -161,16 +174,18 @@ export const deleteProspect = async (req, res) => {
     const { data: existing } = await supabaseAdmin
       .from("prospects")
       .select(
-        "company_name, industry, country, state, city, zone, route, source, " +
+        "created_by, company_name, industry, country, state, city, zone, route, source, " +
         "next_action, next_action_date, feedback, prospect_status, " +
         CONTACT_SELECT
       )
       .eq("id", id)
       .single();
 
+    // Deletion is still restricted (creator or Admin) — team-wide edit
+    // access doesn't have to mean team-wide delete access.
     let query = supabaseAdmin
       .from("prospects")
-      .update({ deleted_at: nowUTC() })
+      .update({ deleted_at: nowUTC(), updated_by: userId })
       .eq("id", id)
       .is("deleted_at", null);
     if (role !== "Admin") query = query.eq("created_by", userId);

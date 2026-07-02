@@ -326,26 +326,56 @@ export async function buildDailyReportData() {
 }
 
 // ── Lifetime (all-time) contribution summary ────────────────────────────
+//
+// Counts actions per employee across every log table, all time — BUT only
+// for actions on records that still exist and haven't been soft-deleted.
+// Without this check, a prospect/lead/etc that was later soft-deleted
+// (deleted_at set) still has its full log history counted here even
+// though it no longer appears anywhere in the live Pipeline view — which
+// is exactly what was making lifetime totals look inflated compared to
+// what's visible in the app. Hard-deleted records are unaffected either
+// way since their logs cascade away with them (or, for any pre-existing
+// orphaned log rows, they're naturally excluded here too since the
+// parent row simply won't be found).
 const LIFETIME_TABLES = [
-  { table: "lead_logs", actorCol: "changed_by", label: "Leads" },
-  { table: "prospect_logs", actorCol: "changed_by", label: "Prospects" },
-  { table: "rfq_logs", actorCol: "changed_by", label: "RFQs" },
-  { table: "rfq_followup_logs", actorCol: "changed_by", label: "Follow-ups" },
-  { table: "sample_logs", actorCol: "updated_by", label: "Samples" },
-  { table: "quotation_logs", actorCol: "updated_by", label: "Quotations" },
+  { table: "lead_logs",         actorCol: "changed_by", entityCol: "lead_id",      parentTable: "leads",         label: "Leads" },
+  { table: "prospect_logs",     actorCol: "changed_by", entityCol: "prospect_id",  parentTable: "prospects",     label: "Prospects" },
+  { table: "rfq_logs",          actorCol: "changed_by", entityCol: "rfq_id",       parentTable: "rfqs",          label: "RFQs" },
+  { table: "rfq_followup_logs", actorCol: "changed_by", entityCol: "followup_id",  parentTable: "rfq_followups", label: "Follow-ups" },
+  { table: "sample_logs",       actorCol: "updated_by", entityCol: "sample_id",    parentTable: "samples",       label: "Samples" },
+  { table: "quotation_logs",    actorCol: "updated_by", entityCol: "quotation_id", parentTable: "quotations",    label: "Quotations" },
 ];
 
-async function fetchAllActorIds(table, actorCol) {
+async function fetchAllActorEntity(table, actorCol, entityCol) {
   let all = [];
   let from = 0;
   for (;;) {
-    const { data, error } = await supabaseAdmin.from(table).select(actorCol).range(from, from + PAGE_SIZE - 1);
+    const { data, error } = await supabaseAdmin
+      .from(table)
+      .select(`${actorCol}, ${entityCol}`)
+      .range(from, from + PAGE_SIZE - 1);
     if (error) throw new Error(`${table} (lifetime): ${error.message}`);
-    all = all.concat((data || []).map((r) => r[actorCol]));
+    all = all.concat(data || []);
     if (!data || data.length < PAGE_SIZE) break;
     from += PAGE_SIZE;
   }
   return all;
+}
+
+// Returns the Set of ids from `parentTable` that exist AND are not
+// soft-deleted (deleted_at IS NULL). Ids that don't exist at all in the
+// parent table (orphaned log references) are simply absent from the
+// result — same effective exclusion as a soft-deleted row.
+async function fetchAliveIds(parentTable, ids) {
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  const alive = new Set();
+  for (let i = 0; i < uniqueIds.length; i += ID_CHUNK) {
+    const chunk = uniqueIds.slice(i, i + ID_CHUNK);
+    const { data, error } = await supabaseAdmin.from(parentTable).select("id, deleted_at").in("id", chunk);
+    if (error) throw new Error(`${parentTable} alive-check: ${error.message}`);
+    (data || []).forEach((row) => { if (!row.deleted_at) alive.add(row.id); });
+  }
+  return alive;
 }
 
 export async function buildLifetimeSummary() {
@@ -355,25 +385,44 @@ export async function buildLifetimeSummary() {
     .eq("is_active", true);
   if (usersErr) throw new Error(`users: ${usersErr.message}`);
 
-  const counts = new Map(); // userId -> { Leads, Prospects, ... , total }
+  const counts = new Map(); // userId -> { name, email, Leads, Prospects, ..., total, known }
   activeUsers.forEach((u) => {
-    counts.set(u.id, { name: userLabel(u) || u.email, email: u.email, total: 0 });
+    counts.set(u.id, { name: userLabel(u) || u.email, email: u.email, total: 0, known: true });
   });
 
-  for (const { table, actorCol, label } of LIFETIME_TABLES) {
-    const actorIds = await fetchAllActorIds(table, actorCol);
-    actorIds.forEach((id) => {
-      if (!id) return;
-      if (!counts.has(id)) {
-        const u = null; // user no longer active/known — still count under raw id
-        counts.set(id, { name: `(inactive user ${id.slice(0, 8)})`, email: "", total: 0 });
-      }
-      const row = counts.get(id);
-      row[label] = (row[label] || 0) + 1;
-      row.total += 1;
-    });
-  }
+  const rawResults = await Promise.all(
+    LIFETIME_TABLES.map(({ table, actorCol, entityCol }) => fetchAllActorEntity(table, actorCol, entityCol))
+  );
 
-  const rows = Array.from(counts.values()).sort((a, b) => b.total - a.total);
+  const aliveSets = await Promise.all(
+    LIFETIME_TABLES.map(({ entityCol, parentTable }, i) =>
+      fetchAliveIds(parentTable, rawResults[i].map((r) => r[entityCol]))
+    )
+  );
+
+  LIFETIME_TABLES.forEach(({ actorCol, entityCol, label }, i) => {
+    const alive = aliveSets[i];
+    rawResults[i].forEach((row) => {
+      const actorId = row[actorCol];
+      const entityId = row[entityCol];
+      if (!actorId) return;
+      if (!alive.has(entityId)) return; // soft-deleted or orphaned — excluded
+
+      if (!counts.has(actorId)) {
+        // Action by a user not in the current active roster (deactivated
+        // or otherwise unknown). Tracked with known:false so it can be
+        // excluded from the final output below, per your request not to
+        // show "(inactive user ...)" rows in the report.
+        counts.set(actorId, { name: `(inactive user ${actorId.slice(0, 8)})`, email: "", total: 0, known: false });
+      }
+      const row_ = counts.get(actorId);
+      row_[label] = (row_[label] || 0) + 1;
+      row_.total += 1;
+    });
+  });
+
+  const rows = Array.from(counts.values())
+    .filter((r) => r.known)
+    .sort((a, b) => b.total - a.total);
   return rows;
 }

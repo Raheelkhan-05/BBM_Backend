@@ -1,6 +1,4 @@
-// samples.controller.js — optimised
-// Same pattern as quotations.controller.js
-
+// samples.controller.js
 import { createClient } from "@supabase/supabase-js";
 import { sendMail } from "../config/mailer.js";
 import {
@@ -18,7 +16,7 @@ const COORDINATOR_EMAIL = process.env.SALES_COORDINATOR_EMAIL;
 const sendMailAsync = (opts) =>
   sendMail(opts).catch((e) => console.error("Mail error:", e.message));
 
-// GET /api/samples — joins kept as-is
+// GET /api/samples
 export const getSamples = async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -32,7 +30,8 @@ export const getSamples = async (req, res) => {
           created_by,
           leads(company_name, primary_contact_name, city, primary_phone)
         ),
-        users(id, email)
+        creator:users!samples_created_by_fkey(id, email, first_name, last_name),
+        updater:users!samples_updated_by_fkey_main(id, email, first_name, last_name)
       `)
       .is("deleted_at", null)
       .order("created_at", { ascending: false });
@@ -45,12 +44,14 @@ export const getSamples = async (req, res) => {
 };
 
 // GET /api/samples/:id/logs
+// No longer Admin-only — every team member updating the same record needs
+// to see who did what before them.
 export const getSampleLogs = async (req, res) => {
   try {
     const { id } = req.params;
     const { data, error } = await supabaseAdmin
       .from("sample_logs")
-      .select("*, users:updated_by(email)")
+      .select("*, users:updated_by(id, email, first_name, last_name)")
       .eq("sample_id", id)
       .order("updated_at", { ascending: false });
 
@@ -68,7 +69,6 @@ export const updateSample = async (req, res) => {
     const { id: userId, email: updaterEmail } = req.user;
     const { sample_status, follow_up_date } = req.body;
 
-    // OPTIMISED: slim SELECT + UPDATE in parallel
     const [
       { data: current, error: fetchErr },
       { data: updated, error: updateErr },
@@ -89,10 +89,11 @@ export const updateSample = async (req, res) => {
           reject_reason:  req.body.reject_reason  || null,
           follow_up_time: req.body.follow_up_time || null,
           notes:          req.body.notes          || null,
+          updated_by: userId, // whoever on the team makes this update becomes the new "last updated by"
           updated_at: new Date().toISOString(),
-      })
+        })
         .eq("id", id)
-        .select()
+        .select("*, creator:users!samples_created_by_fkey(id, email, first_name, last_name), updater:users!samples_updated_by_fkey_main(id, email, first_name, last_name)")
         .single(),
     ]);
 
@@ -103,7 +104,6 @@ export const updateSample = async (req, res) => {
 
     const rfq = current.rfqs || {};
 
-    // Fire log insert + salesperson email fetch + emails — all in background
     Promise.all([
       supabaseAdmin.from("sample_logs").insert([{
         sample_id: id,
@@ -146,19 +146,13 @@ export const updateSample = async (req, res) => {
   }
 };
 
-
 const ACTIVE_SAMPLE_STATUSES_DUE = new Set([
   "Pending",
   "Sent to Customer",
   "Received from Customer",
-]); // Approved / Rejected are terminal — excluded from "due" list
- 
+]);
+
 // GET /api/samples/due
-// SalesCoordinator + Admin: ALL samples not yet in a terminal status
-// (Approved/Rejected) — past due, due today, and upcoming. Sorted by
-// follow_up_date ascending (nulls last) so nearest task shows first;
-// resolved/terminal items are excluded here and surfaced separately
-// by the frontend once acted on, for the "completed" section.
 export const getDueSamples = async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -171,13 +165,14 @@ export const getDueSamples = async (req, res) => {
           consumption_per_month, unit, existing_supplier_brand, created_by,
           leads(company_name, primary_contact_name, city, primary_phone)
         ),
-        users(id, email)
+        creator:users!samples_created_by_fkey(id, email, first_name, last_name),
+        updater:users!samples_updated_by_fkey_main(id, email, first_name, last_name)
       `)
       .is("deleted_at", null)
       .order("follow_up_date", { ascending: true, nullsFirst: false });
- 
+
     if (error) return res.status(400).json({ success: false, message: error.message });
- 
+
     return res.json({ success: true, samples: data || [] });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

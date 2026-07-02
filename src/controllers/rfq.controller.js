@@ -1,5 +1,18 @@
 // controllers/rfq.controller.js
 // Logs EVERY mutation: rfqs, rfq_followups, samples, quotations all get audit rows.
+//
+// TEAM MODEL: any team member can create/update any record. created_by /
+// updated_by track WHO did WHAT (for display + the Mine/Team filter), they
+// no longer gate WHO CAN. Deletion stays restricted to creator-or-Admin.
+//
+// REMOVED: this file used to also export updateSample/updateQuotation,
+// duplicating the versions in samples.controller.js / quotations.controller.js.
+// Two same-named exports from different files is a latent bug — whichever
+// one your routes actually imported determined what got written to
+// sample_logs/quotation_logs, and only one of them could ever be kept in
+// sync with fixes like updated_by tracking. Removed here; make sure your
+// routes file imports updateSample from samples.controller.js and
+// updateQuotation from quotations.controller.js.
 
 import { sendMail } from "../config/mailer.js";
 import { rfqCreatedSalesperson, rfqCreatedCoordinator } from "../config/emailTemplates.js";
@@ -76,22 +89,28 @@ function followupSnapshot(f) {
   };
 }
 
+const RFQ_WITH_CREATOR_UPDATER = `
+  *, leads(id, company_name, primary_contact_name, primary_phone, primary_email, city, country, state),
+  creator:users!rfqs_created_by_fkey(id, email, first_name, last_name),
+  updater:users!rfqs_updated_by_fkey(id, email, first_name, last_name),
+  rfq_followups(*),
+  samples(id, sample_code, sample_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at,
+    creator:users!samples_created_by_fkey(id, email, first_name, last_name),
+    updater:users!samples_updated_by_fkey_main(id, email, first_name, last_name)),
+  quotations(id, quotation_code, quotation_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at,
+    creator:users!quotations_created_by_fkey(id, email, first_name, last_name),
+    updater:users!quotations_updated_by_fkey_main(id, email, first_name, last_name))
+`;
+
 // ── GET /api/rfqs ──────────────────────────────────────────────────────────
+// TEAM VISIBILITY: everyone sees every RFQ. Mine/Team split happens client-side.
 export const getRFQs = async (req, res) => {
   try {
-    const { id: userId, role } = req.user;
-    let query = supabaseAdmin.from("rfqs").select(`
-      *, leads(id, company_name, primary_contact_name, primary_phone, primary_email, city, country, state),
-      users(id, email, role), rfq_followups(*),
-      samples(id, sample_code, sample_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at),
-      quotations(id, quotation_code, quotation_status, result, priority, notes, description, reject_reason, follow_up_date, follow_up_time, updated_at)
-    `).is("deleted_at", null).order("created_at", { ascending: false });
-    if (role === "Admin" || role === "SalesCoordinator") {
-      // no filter — SC needs all RFQs across all salespersons
-    } else {
-      query = query.eq("created_by", userId);
-    }
-    const { data, error } = await query;
+    const { data, error } = await supabaseAdmin
+      .from("rfqs")
+      .select(RFQ_WITH_CREATOR_UPDATER)
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false });
     if (error) return res.status(400).json({ success: false, message: error.message });
     return res.json({ success: true, rfqs: data });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
@@ -100,12 +119,9 @@ export const getRFQs = async (req, res) => {
 // ── GET /api/rfqs/leads ────────────────────────────────────────────────────
 export const getLeadsForRFQ = async (req, res) => {
   try {
-    const { id: userId, role } = req.user;
-    let query = supabaseAdmin.from("leads")
+    const { data, error } = await supabaseAdmin.from("leads")
       .select("id, company_name, primary_contact_name, city, state, country, zone, route, nature_of_business, potential_product_name, potential_product_category, potential_product_sub_category")
       .is("deleted_at", null).order("company_name", { ascending: true });
-    if (role !== "Admin") query = query.eq("created_by", userId);
-    const { data, error } = await query;
     if (error) return res.status(400).json({ success: false, message: error.message });
     return res.json({ success: true, leads: data });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
@@ -114,7 +130,7 @@ export const getLeadsForRFQ = async (req, res) => {
 // ── POST /api/rfqs ─────────────────────────────────────────────────────────
 export const createRFQ = async (req, res) => {
   try {
-    const { id: userId, role } = req.user;
+    const { id: userId } = req.user;
     const {
       lead_id, company_name, product_category, product_sub_category, product_name,
       product_description, consumption_per_month, unit, sample_required, sample_description,
@@ -122,19 +138,7 @@ export const createRFQ = async (req, res) => {
       existing_supplier_brand, notes, target_price, tds_available,
     } = req.body;
 
-    const [leadCheck, salespersonEmail] = await Promise.all([
-      role !== "Admin"
-        ? supabaseAdmin.from("leads").select("created_by").eq("id", lead_id).single()
-        : Promise.resolve({ data: { created_by: userId }, error: null }),
-      getSalespersonEmail(userId),
-    ]);
-
-    if (role !== "Admin") {
-      if (leadCheck.error || !leadCheck.data)
-        return res.status(404).json({ success: false, message: "Lead not found" });
-      if (leadCheck.data.created_by !== userId)
-        return res.status(403).json({ success: false, message: "Not authorized" });
-    }
+    const salespersonEmail = await getSalespersonEmail(userId);
 
     const { data, error } = await supabaseAdmin.from("rfqs").insert([{
       lead_id, company_name, product_category, product_sub_category, product_name,
@@ -143,20 +147,19 @@ export const createRFQ = async (req, res) => {
       sample_received_from_customer: sample_received_from_customer ?? false,
       quotation_required: quotation_required ?? false, quotation_description,
       existing_supplier_brand, notes: notes || null, target_price: target_price || null,
-      tds_available: tds_available ?? false, created_by: userId,
+      tds_available: tds_available ?? false, created_by: userId, updated_by: userId,
     }]).select().single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });
 
     logRFQ(data.id, "created", userId, rfqSnapshot(req.body));
 
-    // Sample + quotation creates — WITH logs
     const sideInserts = [];
     if (sample_required) {
       sideInserts.push(
         supabaseAdmin.from("samples").insert([{
           rfq_id: data.id, sample_required: true,
-          sample_status: null, follow_up_date: null, created_by: userId,
+          sample_status: null, follow_up_date: null, created_by: userId, updated_by: userId,
         }]).select().single().then(({ data: s }) => {
           if (s) logSample(s.id, "created", userId, { sample_status: null, follow_up_date: null });
         })
@@ -166,7 +169,7 @@ export const createRFQ = async (req, res) => {
       sideInserts.push(
         supabaseAdmin.from("quotations").insert([{
           rfq_id: data.id, quotation_required: true,
-          quotation_status: null, follow_up_date: null, created_by: userId,
+          quotation_status: null, follow_up_date: null, created_by: userId, updated_by: userId,
         }]).select().single().then(({ data: q }) => {
           if (q) logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: null });
         })
@@ -187,7 +190,7 @@ export const createRFQ = async (req, res) => {
 export const updateRFQ = async (req, res) => {
   try {
     const { id } = req.params;
-    const { id: userId, role } = req.user;
+    const { id: userId } = req.user;
     const {
       lead_id, company_name, product_category, product_sub_category, product_name,
       product_description, consumption_per_month, unit, sample_required, sample_description,
@@ -199,8 +202,6 @@ export const updateRFQ = async (req, res) => {
       .select("created_by, sample_required, quotation_required").eq("id", id).single();
     if (fetchError || !existing)
       return res.status(404).json({ success: false, message: "RFQ not found" });
-    if (role !== "Admin" && existing.created_by !== userId)
-      return res.status(403).json({ success: false, message: "Not authorized" });
 
     const [{ data, error }, salespersonEmail] = await Promise.all([
       supabaseAdmin.from("rfqs").update({
@@ -210,7 +211,7 @@ export const updateRFQ = async (req, res) => {
         sample_received_from_customer: sample_received_from_customer ?? false,
         quotation_required: quotation_required ?? false, quotation_description,
         existing_supplier_brand, notes: notes || null, target_price: target_price || null,
-        tds_available: tds_available ?? false, updated_at: nowUTC(),
+        tds_available: tds_available ?? false, updated_by: userId, updated_at: nowUTC(),
       }).eq("id", id).select().single(),
       getSalespersonEmail(existing.created_by),
     ]);
@@ -221,7 +222,7 @@ export const updateRFQ = async (req, res) => {
     // Sample toggle
     if (sample_required && !existing.sample_required) {
       supabaseAdmin.from("samples").insert([{
-        rfq_id: id, sample_required: true, sample_status: null, follow_up_date: null, created_by: userId,
+        rfq_id: id, sample_required: true, sample_status: null, follow_up_date: null, created_by: userId, updated_by: userId,
       }]).select().single().then(({ data: s }) => {
         if (s) logSample(s.id, "created", userId, { sample_status: null, follow_up_date: null });
       });
@@ -240,7 +241,7 @@ export const updateRFQ = async (req, res) => {
     // Quotation toggle
     if (quotation_required && !existing.quotation_required) {
       supabaseAdmin.from("quotations").insert([{
-        rfq_id: id, quotation_required: true, quotation_status: null, follow_up_date: null, created_by: userId,
+        rfq_id: id, quotation_required: true, quotation_status: null, follow_up_date: null, created_by: userId, updated_by: userId,
       }]).select().single().then(({ data: q }) => {
         if (q) logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: null });
       });
@@ -261,6 +262,7 @@ export const updateRFQ = async (req, res) => {
 };
 
 // ── DELETE /api/rfqs/:id ───────────────────────────────────────────────────
+// Deletion stays restricted to creator-or-Admin.
 export const deleteRFQ = async (req, res) => {
   try {
     const { id } = req.params;
@@ -274,7 +276,6 @@ export const deleteRFQ = async (req, res) => {
 
     const now = nowUTC();
 
-    // Log sample + quotation deletions before soft-delete
     const [{ data: samplesArr }, { data: quotsArr }] = await Promise.all([
       supabaseAdmin.from("samples").select("id, sample_status").eq("rfq_id", id).is("deleted_at", null),
       supabaseAdmin.from("quotations").select("id, quotation_status").eq("rfq_id", id).is("deleted_at", null),
@@ -288,7 +289,7 @@ export const deleteRFQ = async (req, res) => {
       supabaseAdmin.from("rfq_followups").update({ deleted_at: now }).eq("rfq_id", id).is("deleted_at", null),
     ]);
 
-    const { error } = await supabaseAdmin.from("rfqs").update({ deleted_at: now }).eq("id", id);
+    const { error } = await supabaseAdmin.from("rfqs").update({ deleted_at: now, updated_by: userId }).eq("id", id);
     if (error) return res.status(400).json({ success: false, message: error.message });
 
     logRFQ(id, "deleted", userId);
@@ -300,13 +301,10 @@ export const deleteRFQ = async (req, res) => {
 export const getFollowups = async (req, res) => {
   try {
     const { rfqId } = req.params;
-    const { id: userId, role } = req.user;
-    const [{ data: rfq, error: rfqError }, { data: followups, error: fupError }] = await Promise.all([
-      supabaseAdmin.from("rfqs").select("created_by").eq("id", rfqId).single(),
-      supabaseAdmin.from("rfq_followups").select("*").eq("rfq_id", rfqId).is("deleted_at", null).order("followup_date", { ascending: false }),
-    ]);
-    if (rfqError || !rfq) return res.status(404).json({ success: false, message: "RFQ not found" });
-    if (role !== "Admin" && rfq.created_by !== userId) return res.status(403).json({ success: false, message: "Not authorized" });
+    const { data: followups, error: fupError } = await supabaseAdmin
+      .from("rfq_followups")
+      .select("*, creator:users!rfq_followups_created_by_fkey(id, email, first_name, last_name)")
+      .eq("rfq_id", rfqId).is("deleted_at", null).order("followup_date", { ascending: false });
     if (fupError) return res.status(400).json({ success: false, message: fupError.message });
     return res.json({ success: true, followups: followups || [] });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
@@ -316,12 +314,11 @@ export const getFollowups = async (req, res) => {
 export const createFollowup = async (req, res) => {
   try {
     const { rfqId } = req.params;
-    const { id: userId, role } = req.user;
+    const { id: userId } = req.user;
     const { contact_type, sample_status_update, quotation_status_update, next_action, notes, followup_date, target_price, enquiry_status, remark } = req.body;
 
-    const { data: rfq, error: rfqError } = await supabaseAdmin.from("rfqs").select("created_by").eq("id", rfqId).single();
+    const { data: rfq, error: rfqError } = await supabaseAdmin.from("rfqs").select("id").eq("id", rfqId).single();
     if (rfqError || !rfq) return res.status(404).json({ success: false, message: "RFQ not found" });
-    if (role !== "Admin" && rfq.created_by !== userId) return res.status(403).json({ success: false, message: "Not authorized" });
 
     const { data, error } = await supabaseAdmin.from("rfq_followups").insert([{
       rfq_id: rfqId, contact_type, sample_status_update, quotation_status_update,
@@ -331,6 +328,12 @@ export const createFollowup = async (req, res) => {
 
     if (error) return res.status(400).json({ success: false, message: error.message });
     logFollowup(data.id, "created", userId, followupSnapshot(req.body));
+
+    // A new followup is meaningful activity on the parent RFQ too — reflect it
+    // as the RFQ's last-updated-by so "who last touched this enquiry" stays accurate.
+    supabaseAdmin.from("rfqs").update({ updated_by: userId, updated_at: nowUTC() }).eq("id", rfqId)
+      .then(({ error: e }) => { if (e) console.error("rfqs.updated_by (via followup):", e.message); });
+
     return res.status(201).json({ success: true, followup: data });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
 };
@@ -339,19 +342,16 @@ export const createFollowup = async (req, res) => {
 export const updateFollowup = async (req, res) => {
   try {
     const { id } = req.params;
-    const { id: userId, role } = req.user;
+    const { id: userId } = req.user;
     const { contact_type, sample_status_update, quotation_status_update, next_action, notes, followup_date, target_price, enquiry_status, remark } = req.body;
 
-    let query = supabaseAdmin.from("rfq_followups").update({
+    const { data, error } = await supabaseAdmin.from("rfq_followups").update({
       contact_type, sample_status_update, quotation_status_update, next_action, notes,
       followup_date: followup_date || null, target_price: target_price || null,
       enquiry_status, remark, updated_at: nowUTC(),
-    }).eq("id", id);
-    if (role !== "Admin") query = query.eq("created_by", userId);
-
-    const { data, error } = await query.select().single();
+    }).eq("id", id).select().single();
     if (error) {
-      if (error.code === "PGRST116") return res.status(404).json({ success: false, message: "Follow-up not found or not authorized" });
+      if (error.code === "PGRST116") return res.status(404).json({ success: false, message: "Follow-up not found" });
       return res.status(400).json({ success: false, message: error.message });
     }
     logFollowup(id, "updated", userId, followupSnapshot(req.body));
@@ -363,14 +363,11 @@ export const updateFollowup = async (req, res) => {
 export const deleteFollowup = async (req, res) => {
   try {
     const { id } = req.params;
-    const { id: userId, role } = req.user;
+    const { id: userId } = req.user;
 
-    let query = supabaseAdmin.from("rfq_followups").delete().eq("id", id);
-    if (role !== "Admin") query = query.eq("created_by", userId);
-
-    const { data, error } = await query.select("id").single();
+    const { data, error } = await supabaseAdmin.from("rfq_followups").delete().eq("id", id).select("id").single();
     if (error) {
-      if (error.code === "PGRST116") return res.status(404).json({ success: false, message: "Follow-up not found or not authorized" });
+      if (error.code === "PGRST116") return res.status(404).json({ success: false, message: "Follow-up not found" });
       return res.status(400).json({ success: false, message: error.message });
     }
     logFollowup(id, "deleted", userId);
@@ -378,122 +375,19 @@ export const deleteFollowup = async (req, res) => {
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
 };
 
-// ── Samples controller (separate routes) ──────────────────────────────────
-// PUT /api/samples/:id
-export const updateSample = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { id: userId, role } = req.user;
-    const {
-      sample_status, follow_up_date, follow_up_time,
-      result, priority, notes, description, reject_reason,
-    } = req.body;
-
-    let query = supabaseAdmin.from("samples")
-      .update({
-        sample_status,
-        follow_up_date:  follow_up_date  || null,
-        follow_up_time:  follow_up_time  || null,
-        result:          result          || null,
-        priority:        priority        || null,
-        notes:           notes           || null,
-        description:     description     || null,
-        reject_reason:   reject_reason   || null,
-        updated_at:      nowUTC(),
-      })
-      .eq("id", id);
-    if (role !== "Admin" && role !== "SalesCoordinator") query = query.eq("created_by", userId);
-
-    const { data, error } = await query.select().single();
-    if (error) {
-      if (error.code === "PGRST116") return res.status(404).json({ success: false, message: "Sample not found" });
-      return res.status(400).json({ success: false, message: error.message });
-    }
-    logSample(id, "updated", userId, {
-      sample_status,
-      follow_up_date:  follow_up_date  || null,
-      follow_up_time:  follow_up_time  || null,
-      result:          result          || null,
-      priority:        priority        || null,
-      notes:           notes           || null,
-      description:     description     || null,
-      reject_reason:   reject_reason   || null,
-    });
-    return res.json({ success: true, sample: data });
-  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
-};
-
-// PUT /api/quotations/:id
-export const updateQuotation = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { id: userId, role } = req.user;
-    const {
-      quotation_status, follow_up_date, follow_up_time,
-      result, priority, notes, description, reject_reason,
-    } = req.body;
-
-    let query = supabaseAdmin.from("quotations")
-      .update({
-        quotation_status,
-        follow_up_date:  follow_up_date  || null,
-        follow_up_time:  follow_up_time  || null,
-        result:          result          || null,
-        priority:        priority        || null,
-        notes:           notes           || null,
-        description:     description     || null,
-        reject_reason:   reject_reason   || null,
-        updated_at:      nowUTC(),
-      })
-      .eq("id", id);
-    if (role !== "Admin" && role !== "SalesCoordinator") query = query.eq("created_by", userId);
-
-    const { data, error } = await query.select().single();
-    if (error) {
-      if (error.code === "PGRST116") return res.status(404).json({ success: false, message: "Quotation not found" });
-      return res.status(400).json({ success: false, message: error.message });
-    }
-    logQuotation(id, "updated", userId, {
-      quotation_status,
-      follow_up_date:  follow_up_date  || null,
-      follow_up_time:  follow_up_time  || null,
-      result:          result          || null,
-      priority:        priority        || null,
-      notes:           notes           || null,
-      description:     description     || null,
-      reject_reason:   reject_reason   || null,
-    });
-    return res.json({ success: true, quotation: data });
-  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
-};
+// NOTE: updateSample and updateQuotation are intentionally NOT exported from
+// this file anymore. Use samples.controller.js#updateSample and
+// quotations.controller.js#updateQuotation instead.
 
 const CLOSED_STATUSES = new Set(["Won", "Lost"]);
 const CLOSED_ACTIONS  = new Set(["Close Enquiry", "No Further Action"]);
- 
-function isEnquiryClosedServer(followups) {
-  const active = (followups || []).filter((f) => !f.deleted_at);
-  if (!active.length) return false;
-  const latest = [...active].sort(
-    (a, b) => new Date(b.created_at) - new Date(a.created_at)
-  )[0];
-  return CLOSED_STATUSES.has(latest.enquiry_status) || CLOSED_ACTIONS.has(latest.next_action);
-}
- 
+
 // ─────────────────────────────────────────────────────────────────────
-// GET /api/rfqs/followups/due
-// Salesperson: only their own rfqs (rfqs.created_by = me).
-// Admin: everyone's.
-// Returns ALL open enquiries (not closed: Won/Lost/Close Enquiry/No
-// Further Action) that have at least one followup with a date — past,
-// today, or future. Sorting/grouping (overdue first, completed last)
-// is handled client-side so the list can re-sort instantly as tasks
-// get resolved without a refetch.
+// GET /api/rfqs/followups/due — team-wide (everyone sees all open enquiries)
 // ─────────────────────────────────────────────────────────────────────
 export const getDueFollowups = async (req, res) => {
   try {
-    const { id: userId, role } = req.user;
- 
-    let query = supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from("rfqs")
       .select(`
         id, lead_id, company_name, product_category, product_sub_category,
@@ -506,12 +400,9 @@ export const getDueFollowups = async (req, res) => {
         )
       `)
       .is("deleted_at", null);
- 
-    if (role !== "Admin") query = query.eq("created_by", userId);
- 
-    const { data, error } = await query;
+
     if (error) return res.status(400).json({ success: false, message: error.message });
- 
+
     const due = (data || [])
       .map((rfq) => {
         const fups = (rfq.rfq_followups || []).filter((f) => !f.deleted_at);
@@ -520,86 +411,51 @@ export const getDueFollowups = async (req, res) => {
           (a, b) => new Date(b.created_at) - new Date(a.created_at)
         )[0];
         if (!latest.followup_date) return null;
-        // if (isEnquiryClosedServer(fups)) return null; // closed — handled by separate "completed" logic client-side if ever needed
         return { ...rfq, latest_followup: latest, rfq_followups: undefined };
       })
       .filter(Boolean)
       .sort((a, b) => a.latest_followup.followup_date.localeCompare(b.latest_followup.followup_date));
- 
+
     return res.json({ success: true, tasks: due });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
- 
+
 // ─────────────────────────────────────────────────────────────────────
 // POST /api/rfqs/:id/followups/resolve
-// Body: { outcome: "Won" | "Lost" | "Next", contact_type, remark,
-//         next_followup_date, next_followup_time, manual_next_action }
-//
-// - Won/Lost: writes a single followup row closing the enquiry.
-// - Next: writes a followup row with enquiry_status carried forward
-//   (kept "Open"/"In Progress" — not closed), next_action auto-derived
-//   from latest sample/quotation status (or manual_next_action if the
-//   rfq has neither sample nor quotation attached).
 // ─────────────────────────────────────────────────────────────────────
 export const resolveFollowup = async (req, res) => {
   try {
     const { id } = req.params; // rfq id
     const { id: userId } = req.user;
     const {
-      outcome,               // "Won" | "Lost" | "Next"
-      contact_type,
-      remark,
-      next_followup_date,
-      next_followup_time,
-      manual_next_action,
+      outcome, contact_type, remark,
+      next_followup_date, next_followup_time, manual_next_action,
     } = req.body;
- 
+
     if (!["Won", "Lost", "Next"].includes(outcome)) {
       return res.status(400).json({ success: false, message: "Invalid outcome" });
     }
     if (!contact_type) {
       return res.status(400).json({ success: false, message: "contact_type is required" });
     }
- 
-    // Fetch rfq + latest sample + latest quotation for next-action derivation
+
     const [{ data: rfq, error: rfqErr }, { data: sampleRows }, { data: quoteRows }] = await Promise.all([
-      supabaseAdmin
-        .from("rfqs")
-        .select("id, sample_required, quotation_required")
-        .eq("id", id)
-        .single(),
-      supabaseAdmin
-        .from("samples")
-        .select("sample_status, updated_at")
-        .eq("rfq_id", id)
-        .is("deleted_at", null)
-        .order("updated_at", { ascending: false })
-        .limit(1),
-      supabaseAdmin
-        .from("quotations")
-        .select("quotation_status, updated_at")
-        .eq("rfq_id", id)
-        .is("deleted_at", null)
-        .order("updated_at", { ascending: false })
-        .limit(1),
+      supabaseAdmin.from("rfqs").select("id, sample_required, quotation_required").eq("id", id).single(),
+      supabaseAdmin.from("samples").select("sample_status, updated_at").eq("rfq_id", id).is("deleted_at", null).order("updated_at", { ascending: false }).limit(1),
+      supabaseAdmin.from("quotations").select("quotation_status, updated_at").eq("rfq_id", id).is("deleted_at", null).order("updated_at", { ascending: false }).limit(1),
     ]);
- 
+
     if (rfqErr || !rfq) {
       return res.status(404).json({ success: false, message: "Enquiry not found" });
     }
- 
+
     let payload;
     if (outcome === "Won" || outcome === "Lost") {
       payload = {
-        rfq_id: id,
-        contact_type,
-        enquiry_status: outcome,
-        next_action: null,
-        remark: remark || null,
-        followup_date: new Date().toISOString().slice(0, 10),
-        created_by: userId,
+        rfq_id: id, contact_type, enquiry_status: outcome, next_action: null,
+        remark: remark || null, followup_date: new Date().toISOString().slice(0, 10), created_by: userId,
       };
     } else {
       if (!next_followup_date) {
@@ -607,27 +463,28 @@ export const resolveFollowup = async (req, res) => {
       }
       const derived = deriveNextAction(rfq, sampleRows?.[0] || null, quoteRows?.[0] || null);
       payload = {
-        rfq_id: id,
-        contact_type,
-        enquiry_status: "In Progress",
-        next_action: manual_next_action || derived || null,
-        remark: remark || null,
+        rfq_id: id, contact_type, enquiry_status: "In Progress",
+        next_action: manual_next_action || derived || null, remark: remark || null,
         followup_date: next_followup_date,
         notes: next_followup_time ? `[Time: ${next_followup_time}]` : null,
         created_by: userId,
       };
     }
- 
+
     const { data: followup, error: insertErr } = await supabaseAdmin
-      .from("rfq_followups")
-      .insert([payload])
-      .select()
-      .single();
- 
+      .from("rfq_followups").insert([payload]).select().single();
+
     if (insertErr) {
       return res.status(400).json({ success: false, message: insertErr.message });
     }
- 
+
+    // Log this resolution (previously missing — Won/Lost/Next resolutions
+    // never reached rfq_followup_logs, so they were invisible to any
+    // activity report or "who did what" history).
+    logFollowup(followup.id, "created", userId, followupSnapshot(payload));
+    supabaseAdmin.from("rfqs").update({ updated_by: userId, updated_at: nowUTC() }).eq("id", id)
+      .then(({ error: e }) => { if (e) console.error("rfqs.updated_by (via resolve):", e.message); });
+
     return res.json({ success: true, followup });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

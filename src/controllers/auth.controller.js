@@ -20,7 +20,7 @@
 //   - bcrypt rounds reduced to 8
 import { supabase } from "../config/supabase.js";
 import { createClient }  from "@supabase/supabase-js";
-import { sendMail }      from "../config/mailer.js";
+import { sendMail, sendMailWithRetry }      from "../config/mailer.js";
 import { otpEmail }      from "../config/emailTemplates.js";
 import { invalidateProfileCache } from "../middleware/auth.js";
 import bcrypt            from "bcrypt";
@@ -301,10 +301,22 @@ export const sendOtp = async (req, res) => {
     // Run bcrypt hash + send email in parallel
     // storeOtp does the hash+upsert; sendMail does SMTP
     // Both are now awaited so Vercel doesn't kill the function before email sends
-    await Promise.all([
+    // Run bcrypt hash + send email in parallel
+    const [, mailResult] = await Promise.all([
       storeOtp(cleanEmail, code),
-      sendMail(otpEmail({ email: cleanEmail, name: user.first_name || "", token: code })),
+      sendMailWithRetry(otpEmail({ email: cleanEmail, name: user.first_name || "", token: code })),
+      // if you skipped the retry helper, just use:
+      // sendMail(otpEmail({ email: cleanEmail, name: user.first_name || "", token: code })),
     ]);
+
+    if (!mailResult.success) {
+      // Don't leave a dangling OTP the user can never receive
+      await supabaseAdmin.from("otp_codes").delete().eq("email", cleanEmail);
+      return res.status(502).json({
+        success: false,
+        message: "We couldn't send the code right now. Please try again.",
+      });
+    }
 
     return res.json({
       success: true,
