@@ -4,14 +4,21 @@ import { buildDailyReportData, buildLifetimeSummary, buildLifetimeActivityLog } 
 import { buildDailyReportPdf } from "./pdfReport.builder.js";
 import { sendMail } from "../config/mailer.js";
 
-// Add as many recipients as you need — nodemailer accepts an array here
-// and will send to all of them (shows up as a normal multi-recipient
-// email, everyone sees each other in "To").
-const REPORT_RECIPIENTS = [
+// Add as many recipients as you need — everyone here goes on BCC, so
+// none of them can see who else received the report. The visible "To"
+// address is set separately below (a neutral self-send), since an email
+// with no visible recipients at all can look broken or get flagged by
+// spam filters.
+const REPORT_RECIPIENTS_BCC = [
   "communication@bbmpvtltd.com",
   "2005raheelkhan@gmail.com",
-  // "another.person@bbmpvtltd.com",
+  // "someoneelse@bbmpvtltd.com",
 ];
+
+// The one visible "To" address — recipients only see this, never each
+// other. Using the first BCC address here is fine (that person just sees
+// their own email in "To", same as everyone else on BCC sees nothing).
+const REPORT_VISIBLE_TO = "communication@bbmpvtltd.com";
 
 function todayLabelIST() {
   return new Date().toLocaleDateString("en-IN", {
@@ -32,7 +39,8 @@ export async function sendDailyReport() {
   const dateLabel = todayLabelIST();
 
   await sendMail({
-    to: REPORT_RECIPIENTS,
+    to: REPORT_VISIBLE_TO,
+    bcc: REPORT_RECIPIENTS_BCC,
     subject: `[BBM CRM] Daily Activity Report — ${dateLabel}`,
     headers: {
       "Message-ID": `<daily-report-${Date.now()}@bbm.crm>`,
