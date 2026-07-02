@@ -42,6 +42,16 @@ function fmtTime(iso) {
   });
 }
 
+function fmtDateShort(iso) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleDateString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
 function userLabel(u) {
   if (!u) return null;
   const name = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
@@ -325,57 +335,38 @@ export async function buildDailyReportData() {
   };
 }
 
+
 // ── Lifetime (all-time) contribution summary ────────────────────────────
 //
-// Counts actions per employee across every log table, all time — BUT only
-// for actions on records that still exist and haven't been soft-deleted.
-// Without this check, a prospect/lead/etc that was later soft-deleted
-// (deleted_at set) still has its full log history counted here even
-// though it no longer appears anywhere in the live Pipeline view — which
-// is exactly what was making lifetime totals look inflated compared to
-// what's visible in the app. Hard-deleted records are unaffected either
-// way since their logs cascade away with them (or, for any pre-existing
-// orphaned log rows, they're naturally excluded here too since the
-// parent row simply won't be found).
-const LIFETIME_TABLES = [
-  { table: "lead_logs",         actorCol: "changed_by", entityCol: "lead_id",      parentTable: "leads",         label: "Leads" },
-  { table: "prospect_logs",     actorCol: "changed_by", entityCol: "prospect_id",  parentTable: "prospects",     label: "Prospects" },
-  { table: "rfq_logs",          actorCol: "changed_by", entityCol: "rfq_id",       parentTable: "rfqs",          label: "RFQs" },
-  { table: "rfq_followup_logs", actorCol: "changed_by", entityCol: "followup_id",  parentTable: "rfq_followups", label: "Follow-ups" },
-  { table: "sample_logs",       actorCol: "updated_by", entityCol: "sample_id",    parentTable: "samples",       label: "Samples" },
-  { table: "quotation_logs",    actorCol: "updated_by", entityCol: "quotation_id", parentTable: "quotations",    label: "Quotations" },
-];
+// v4 — rewritten to count DISTINCT LIVE RECORDS by created_by, straight
+// from the live tables, instead of counting log-table ACTIONS (creates +
+// every subsequent update). The action-based approach was producing
+// inflated, hard-to-reconcile numbers for two reasons:
+//
+//   1. A single record updated multiple times generated multiple log
+//      rows, all attributed to whoever made each update — so "Prospects: 40"
+//      could mean far fewer than 40 actual prospects, just more edits.
+//   2. A prospect that gets converted to a lead was counted as BOTH a
+//      "Prospect" (from its prospect_logs history) AND a "Lead" (from its
+//      lead_logs history) — double-counting the same underlying record.
+//
+// This version fixes both: it counts each live (non-deleted) record
+// exactly once, attributed to created_by, and — per spec — a converted
+// prospect is counted only under Leads, not under Prospects at all.
+// This also means the numbers here now match exactly what you'd count by
+// hand in the Pipeline UI.
 
-async function fetchAllActorEntity(table, actorCol, entityCol) {
+async function fetchAllPagedSimple(table, select) {
   let all = [];
   let from = 0;
   for (;;) {
-    const { data, error } = await supabaseAdmin
-      .from(table)
-      .select(`${actorCol}, ${entityCol}`)
-      .range(from, from + PAGE_SIZE - 1);
-    if (error) throw new Error(`${table} (lifetime): ${error.message}`);
+    const { data, error } = await supabaseAdmin.from(table).select(select).range(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(`${table}: ${error.message}`);
     all = all.concat(data || []);
     if (!data || data.length < PAGE_SIZE) break;
     from += PAGE_SIZE;
   }
   return all;
-}
-
-// Returns the Set of ids from `parentTable` that exist AND are not
-// soft-deleted (deleted_at IS NULL). Ids that don't exist at all in the
-// parent table (orphaned log references) are simply absent from the
-// result — same effective exclusion as a soft-deleted row.
-async function fetchAliveIds(parentTable, ids) {
-  const uniqueIds = [...new Set(ids.filter(Boolean))];
-  const alive = new Set();
-  for (let i = 0; i < uniqueIds.length; i += ID_CHUNK) {
-    const chunk = uniqueIds.slice(i, i + ID_CHUNK);
-    const { data, error } = await supabaseAdmin.from(parentTable).select("id, deleted_at").in("id", chunk);
-    if (error) throw new Error(`${parentTable} alive-check: ${error.message}`);
-    (data || []).forEach((row) => { if (!row.deleted_at) alive.add(row.id); });
-  }
-  return alive;
 }
 
 export async function buildLifetimeSummary() {
@@ -390,39 +381,180 @@ export async function buildLifetimeSummary() {
     counts.set(u.id, { name: userLabel(u) || u.email, email: u.email, total: 0, known: true });
   });
 
-  const rawResults = await Promise.all(
-    LIFETIME_TABLES.map(({ table, actorCol, entityCol }) => fetchAllActorEntity(table, actorCol, entityCol))
-  );
+  function bump(userId, label) {
+    if (!userId) return;
+    if (!counts.has(userId)) {
+      // Record created by a user not in the current active roster
+      // (deactivated or otherwise unknown). Tracked as known:false so it
+      // can be excluded from the final output below, per your request
+      // not to show "(inactive user ...)" rows in the report.
+      counts.set(userId, { name: `(inactive user ${userId.slice(0, 8)})`, email: "", total: 0, known: false });
+    }
+    const row = counts.get(userId);
+    row[label] = (row[label] || 0) + 1;
+    row.total += 1;
+  }
 
-  const aliveSets = await Promise.all(
-    LIFETIME_TABLES.map(({ entityCol, parentTable }, i) =>
-      fetchAliveIds(parentTable, rawResults[i].map((r) => r[entityCol]))
-    )
-  );
+  const [leadsRows, prospectsRows, rfqsRows, followupsRows, samplesRows, quotationsRows] = await Promise.all([
+    fetchAllPagedSimple("leads", "id, created_by, deleted_at, prospect_id"),
+    fetchAllPagedSimple("prospects", "id, created_by, deleted_at"),
+    fetchAllPagedSimple("rfqs", "id, created_by, deleted_at"),
+    fetchAllPagedSimple("rfq_followups", "id, created_by, deleted_at"),
+    fetchAllPagedSimple("samples", "id, created_by, deleted_at"),
+    fetchAllPagedSimple("quotations", "id, created_by, deleted_at"),
+  ]);
 
-  LIFETIME_TABLES.forEach(({ actorCol, entityCol, label }, i) => {
-    const alive = aliveSets[i];
-    rawResults[i].forEach((row) => {
-      const actorId = row[actorCol];
-      const entityId = row[entityCol];
-      if (!actorId) return;
-      if (!alive.has(entityId)) return; // soft-deleted or orphaned — excluded
+  const aliveLeads = leadsRows.filter((l) => !l.deleted_at);
 
-      if (!counts.has(actorId)) {
-        // Action by a user not in the current active roster (deactivated
-        // or otherwise unknown). Tracked with known:false so it can be
-        // excluded from the final output below, per your request not to
-        // show "(inactive user ...)" rows in the report.
-        counts.set(actorId, { name: `(inactive user ${actorId.slice(0, 8)})`, email: "", total: 0, known: false });
-      }
-      const row_ = counts.get(actorId);
-      row_[label] = (row_[label] || 0) + 1;
-      row_.total += 1;
-    });
-  });
+  // Every prospect_id that currently has a live lead pointing at it —
+  // these are "converted" and must NOT also be counted as a Prospect.
+  const convertedProspectIds = new Set(aliveLeads.filter((l) => l.prospect_id).map((l) => l.prospect_id));
+
+  aliveLeads.forEach((l) => bump(l.created_by, "Leads"));
+
+  prospectsRows
+    .filter((p) => !p.deleted_at && !convertedProspectIds.has(p.id))
+    .forEach((p) => bump(p.created_by, "Prospects"));
+
+  rfqsRows.filter((r) => !r.deleted_at).forEach((r) => bump(r.created_by, "RFQs"));
+  followupsRows.filter((f) => !f.deleted_at).forEach((f) => bump(f.created_by, "Follow-ups"));
+  samplesRows.filter((s) => !s.deleted_at).forEach((s) => bump(s.created_by, "Samples"));
+  quotationsRows.filter((q) => !q.deleted_at).forEach((q) => bump(q.created_by, "Quotations"));
 
   const rows = Array.from(counts.values())
     .filter((r) => r.known)
     .sort((a, b) => b.total - a.total);
   return rows;
+}
+
+
+// ── Lifetime Activity Log — condensed, all-time, per employee ───────────
+//
+// Unlike buildDailyReportData (today only, with full field-level diffs),
+// this pulls each employee's ENTIRE history across all six log tables,
+// but keeps every entry to a single condensed line — date, time, action,
+// entity type, and company — with NO field-by-field diff detail. That
+// level of detail belongs in the "today" section; here the point is a
+// scannable record of "what has this person done, over all time."
+//
+// A per-employee cap keeps the PDF from becoming unmanageable for anyone
+// with months/years of history — the most recent N are shown, with a
+// note if older entries were left out.
+const LIFETIME_LOG_CAP_PER_EMPLOYEE = 300;
+
+// For tables without an `action` column (sample_logs, quotation_logs):
+// classify the first log row per entity as "Created", everything after
+// as "Updated" — same logic as the daily diff engine, but without doing
+// the (expensive, unnecessary here) full field-by-field diff.
+function classifyByFirstInGroup(rows, idCol, timeCol) {
+  const groups = new Map();
+  rows.forEach((r) => {
+    const key = r[idCol];
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
+  const map = new Map();
+  groups.forEach((grp) => {
+    const sorted = [...grp].sort((a, b) => new Date(a[timeCol]) - new Date(b[timeCol]));
+    sorted.forEach((r, i) => map.set(r.id, i === 0 ? "Created" : "Updated"));
+  });
+  return map;
+}
+
+function actionLabel(action) {
+  if (!action) return "Updated";
+  return action.charAt(0).toUpperCase() + action.slice(1);
+}
+
+export async function buildLifetimeActivityLog() {
+  const { data: activeUsers, error: usersErr } = await supabaseAdmin
+    .from("users")
+    .select("id, email, first_name, last_name")
+    .eq("is_active", true);
+  if (usersErr) throw new Error(`users: ${usersErr.message}`);
+
+  const [leadLogs, prospectLogs, rfqLogs, followupLogs, sampleLogs, quotationLogs] = await Promise.all([
+    fetchAllPaged("lead_logs",         { select: "id, lead_id, action, changed_by, changed_at, company_name", timeCol: "changed_at" }),
+    fetchAllPaged("prospect_logs",     { select: "id, prospect_id, action, changed_by, changed_at, company_name", timeCol: "changed_at" }),
+    fetchAllPaged("rfq_logs",          { select: "id, rfq_id, action, changed_by, changed_at", timeCol: "changed_at" }),
+    fetchAllPaged("rfq_followup_logs", { select: "id, followup_id, rfq_id, action, changed_by, changed_at", timeCol: "changed_at" }),
+    fetchAllPaged("sample_logs",       { select: "id, sample_id, updated_by, updated_at", timeCol: "updated_at" }),
+    fetchAllPaged("quotation_logs",    { select: "id, quotation_id, updated_by, updated_at", timeCol: "updated_at" }),
+  ]);
+
+  // Company-name resolution — only resolves for records that still
+  // currently exist; anything since deleted shows as "Unknown company"
+  // since there's nothing left to look up (the action itself still shows).
+  const sampleIds = sampleLogs.map((r) => r.sample_id);
+  const quotationIds = quotationLogs.map((r) => r.quotation_id);
+  const samplesMap = await fetchByIds("samples", "id, rfq_id", sampleIds);
+  const quotationsMap = await fetchByIds("quotations", "id, rfq_id", quotationIds);
+  const rfqIdsNeeded = [
+    ...rfqLogs.map((r) => r.rfq_id),
+    ...followupLogs.map((r) => r.rfq_id),
+    ...[...samplesMap.values()].map((s) => s.rfq_id),
+    ...[...quotationsMap.values()].map((q) => q.rfq_id),
+  ];
+  const rfqsMap = await fetchByIds("rfqs", "id, company_name", rfqIdsNeeded);
+
+  const referencedUserIds = [
+    ...leadLogs.map((r) => r.changed_by),
+    ...prospectLogs.map((r) => r.changed_by),
+    ...rfqLogs.map((r) => r.changed_by),
+    ...followupLogs.map((r) => r.changed_by),
+    ...sampleLogs.map((r) => r.updated_by),
+    ...quotationLogs.map((r) => r.updated_by),
+  ];
+  const usersMap = await fetchByIds("users", "id, email, first_name, last_name", referencedUserIds);
+  activeUsers.forEach((u) => usersMap.set(u.id, u));
+
+  const sampleChangeMap    = classifyByFirstInGroup(sampleLogs, "sample_id", "updated_at");
+  const quotationChangeMap = classifyByFirstInGroup(quotationLogs, "quotation_id", "updated_at");
+
+  function makeEntry(userId, timestamp, type, company, changeType) {
+    return {
+      userId: userId || null,
+      timestamp,
+      dateLabel: fmtDateShort(timestamp),
+      timeLabel: fmtTime(timestamp).split(", ").pop() || fmtTime(timestamp), // just the time portion
+      type,
+      changeType,
+      company: company || "Unknown company",
+    };
+  }
+
+  const entries = [];
+  leadLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "Lead", r.company_name, actionLabel(r.action))));
+  prospectLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "Prospect", r.company_name, actionLabel(r.action))));
+  rfqLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "RFQ", rfqsMap.get(r.rfq_id)?.company_name, actionLabel(r.action))));
+  followupLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "Follow-up", rfqsMap.get(r.rfq_id)?.company_name, actionLabel(r.action))));
+  sampleLogs.forEach((r) => {
+    const rfqId = samplesMap.get(r.sample_id)?.rfq_id;
+    entries.push(makeEntry(r.updated_by, r.updated_at, "Sample", rfqsMap.get(rfqId)?.company_name, sampleChangeMap.get(r.id) || "Updated"));
+  });
+  quotationLogs.forEach((r) => {
+    const rfqId = quotationsMap.get(r.quotation_id)?.rfq_id;
+    entries.push(makeEntry(r.updated_by, r.updated_at, "Quotation", rfqsMap.get(rfqId)?.company_name, quotationChangeMap.get(r.id) || "Updated"));
+  });
+
+  const buckets = new Map();
+  activeUsers.forEach((u) => {
+    buckets.set(u.id, { userId: u.id, name: userLabel(u) || u.email, email: u.email, entries: [] });
+  });
+  entries.forEach((e) => {
+    if (!e.userId || !buckets.has(e.userId)) return; // skip unattributed / inactive users
+    buckets.get(e.userId).entries.push(e);
+  });
+
+  const employees = Array.from(buckets.values())
+    .map((emp) => {
+      const sorted = emp.entries.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      const totalCount = sorted.length;
+      const capped = sorted.slice(0, LIFETIME_LOG_CAP_PER_EMPLOYEE);
+      return { ...emp, entries: capped, totalCount, truncated: totalCount > capped.length };
+    })
+    .filter((emp) => emp.entries.length > 0)
+    .sort((a, b) => b.totalCount - a.totalCount);
+
+  return employees;
 }

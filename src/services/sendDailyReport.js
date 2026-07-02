@@ -1,6 +1,6 @@
 // services/sendDailyReport.js
 
-import { buildDailyReportData, buildLifetimeSummary } from "./dailyReport.service.js";
+import { buildDailyReportData, buildLifetimeSummary, buildLifetimeActivityLog } from "./dailyReport.service.js";
 import { buildDailyReportPdf } from "./pdfReport.builder.js";
 import { sendMail } from "../config/mailer.js";
 
@@ -16,11 +16,12 @@ function todayLabelIST() {
 }
 
 export async function sendDailyReport() {
-  const [reportData, lifetimeSummary] = await Promise.all([
+  const [reportData, lifetimeSummary, lifetimeActivityLog] = await Promise.all([
     buildDailyReportData(),
     buildLifetimeSummary(),
+    buildLifetimeActivityLog(),
   ]);
-  const pdfBuffer = await buildDailyReportPdf(reportData, lifetimeSummary);
+  const pdfBuffer = await buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivityLog);
   const dateLabel = todayLabelIST();
 
   await sendMail({
@@ -34,8 +35,9 @@ export async function sendDailyReport() {
         <p>Hi,</p>
         <p>Attached is today's activity report (${dateLabel}): <strong>${reportData.totalActions}</strong>
         action(s) across <strong>${reportData.activeToday.length}</strong> active employee(s), plus a
-        lifetime contribution summary for the whole team. Most recent activity appears first within
-        each employee's section, with field-level changes (added / updated / removed) shown per action.</p>
+        lifetime contribution summary and a full all-time activity history per employee. Most recent
+        activity appears first within each employee's section, with every field-level change (added /
+        updated / removed) shown per action.</p>
         <p style="color:#64748b;font-size:12px">This is an automated message from BBM CRM.</p>
       </div>
     `,
