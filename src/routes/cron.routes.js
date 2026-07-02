@@ -16,6 +16,13 @@ const router = Router();
 
 router.get("/daily-report", async (req, res) => {
   const auth = req.headers.authorization;
+
+  // TEMPORARY DEBUG — remove once this is confirmed working. Logs only
+  // booleans, never the actual secret, so it's safe to leave in Vercel's
+  // logs briefly while diagnosing.
+  console.log("[cron/daily-report] CRON_SECRET set?", Boolean(process.env.CRON_SECRET));
+  console.log("[cron/daily-report] Authorization header present?", Boolean(auth));
+
   if (!process.env.CRON_SECRET || auth !== `Bearer ${process.env.CRON_SECRET}`) {
     return res.status(401).json({ success: false, message: "Unauthorized" });
   }
