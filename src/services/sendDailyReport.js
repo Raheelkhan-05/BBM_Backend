@@ -4,7 +4,10 @@ import { buildDailyReportData, buildLifetimeSummary, buildLifetimeActivityLog } 
 import { buildDailyReportPdf } from "./pdfReport.builder.js";
 import { sendMail } from "../config/mailer.js";
 
-const REPORT_RECIPIENT = "communication@bbmpvtltd.com";
+const REPORT_RECIPIENTS = [
+  "communication@bbmpvtltd.com",
+  "2005raheelkhan@gmail.com",
+];
 
 function todayLabelIST() {
   return new Date().toLocaleDateString("en-IN", {
