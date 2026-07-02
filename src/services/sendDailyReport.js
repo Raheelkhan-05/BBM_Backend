@@ -4,9 +4,13 @@ import { buildDailyReportData, buildLifetimeSummary, buildLifetimeActivityLog } 
 import { buildDailyReportPdf } from "./pdfReport.builder.js";
 import { sendMail } from "../config/mailer.js";
 
+// Add as many recipients as you need — nodemailer accepts an array here
+// and will send to all of them (shows up as a normal multi-recipient
+// email, everyone sees each other in "To").
 const REPORT_RECIPIENTS = [
   "communication@bbmpvtltd.com",
   "2005raheelkhan@gmail.com",
+  // "another.person@bbmpvtltd.com",
 ];
 
 function todayLabelIST() {
@@ -28,7 +32,7 @@ export async function sendDailyReport() {
   const dateLabel = todayLabelIST();
 
   await sendMail({
-    to: REPORT_RECIPIENT,
+    to: REPORT_RECIPIENTS,
     subject: `[BBM CRM] Daily Activity Report — ${dateLabel}`,
     headers: {
       "Message-ID": `<daily-report-${Date.now()}@bbm.crm>`,
