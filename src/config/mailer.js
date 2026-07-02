@@ -1,8 +1,7 @@
 // config/mailer.js
 //
-// Same as before, plus optional `cc`/`bcc` support (needed so the daily
-// report can go to multiple recipients without them seeing each other).
-// Existing calls to sendMail({to, subject, html, headers, attachments})
+// Same as before, plus optional `attachments` support (needed for the
+// daily PDF report). Existing calls to sendMail({to, subject, html, headers})
 // keep working unchanged.
 
 import nodemailer from "nodemailer";
@@ -21,13 +20,11 @@ const transporter = nodemailer.createTransport({
   pool: false,
 });
 
-export const sendMail = async ({ to, cc, bcc, subject, html, headers, attachments }) => {
+export const sendMail = async ({ to, subject, html, headers, attachments }) => {
   try {
     await transporter.sendMail({
       from: process.env.SMTP_FROM,
       to,
-      ...(cc ? { cc } : {}),
-      ...(bcc ? { bcc } : {}),
       subject,
       html,
       ...(headers ? { headers } : {}),
