@@ -1,9 +1,9 @@
 // config/mailer.js
 //
-// Same as before, plus optional `attachments`, `cc`, and `bcc` support
-// (bcc needed for the daily report, so recipients don't see each other).
-// Existing calls to sendMail({to, subject, html, headers}) keep working
-// unchanged.
+// Same as before, plus optional `cc`/`bcc` support (needed so the daily
+// report can go to multiple recipients without them seeing each other).
+// Existing calls to sendMail({to, subject, html, headers, attachments})
+// keep working unchanged.
 
 import nodemailer from "nodemailer";
 
@@ -15,6 +15,10 @@ const transporter = nodemailer.createTransport({
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
+  connectionTimeout: 10_000,
+  greetingTimeout: 10_000,
+  socketTimeout: 15_000,
+  pool: false,
 });
 
 export const sendMail = async ({ to, cc, bcc, subject, html, headers, attachments }) => {
@@ -26,13 +30,21 @@ export const sendMail = async ({ to, cc, bcc, subject, html, headers, attachment
       ...(bcc ? { bcc } : {}),
       subject,
       html,
-      // Threading headers (In-Reply-To, References, Message-ID).
       ...(headers ? { headers } : {}),
-      // e.g. [{ filename: "report.pdf", content: bufferOrBase64, contentType: "application/pdf" }]
       ...(attachments ? { attachments } : {}),
     });
+    return { success: true };
   } catch (err) {
     console.error("Mail error:", err.message);
-    // Never throw — mail failure should not break API response
+    return { success: false, error: err.message };
   }
+};
+
+export const sendMailWithRetry = async (opts, attempts = 2) => {
+  for (let i = 0; i <= attempts; i++) {
+    const result = await sendMail(opts);
+    if (result.success) return result;
+    if (i < attempts) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+  }
+  return { success: false, error: "max retries exceeded" };
 };
