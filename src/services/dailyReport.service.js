@@ -31,9 +31,27 @@ function startOfTodayIST() {
   return new Date(istNow.getTime() - IST_OFFSET_MS).toISOString();
 }
 
+// Several MAIN tables (prospects, leads, rfqs, samples, quotations,
+// rfq_followups) store created_at/updated_at as Postgres "timestamp
+// WITHOUT time zone" — unlike every *_logs table, which correctly uses
+// "timestamp WITH time zone". Values from a tz-less column come back from
+// Supabase with no "Z"/offset suffix at all, and JS's Date constructor
+// can then ambiguously treat that as local time instead of UTC depending
+// on the runtime's own timezone — this was the exact cause of follow-up
+// times showing hours off (e.g. a 10:48 AM IST action displaying as
+// 5:17 AM). Forcing an explicit "Z" whenever no timezone marker is
+// present makes the interpretation unambiguous regardless of runtime tz.
+function toUtcDate(raw) {
+  if (!raw) return null;
+  const hasTz = /Z$|[+-]\d{2}:?\d{2}$/.test(raw);
+  return new Date(hasTz ? raw : `${raw}Z`);
+}
+
 function fmtTime(iso) {
   if (!iso) return "";
-  return new Date(iso).toLocaleString("en-IN", {
+  const d = toUtcDate(iso);
+  if (!d) return "";
+  return d.toLocaleString("en-IN", {
     timeZone: "Asia/Kolkata",
     hour: "2-digit",
     minute: "2-digit",
@@ -44,12 +62,26 @@ function fmtTime(iso) {
 
 function fmtDateShort(iso) {
   if (!iso) return "";
-  return new Date(iso).toLocaleDateString("en-IN", {
+  const d = toUtcDate(iso);
+  if (!d) return "";
+  return d.toLocaleDateString("en-IN", {
     timeZone: "Asia/Kolkata",
     day: "2-digit",
     month: "short",
     year: "numeric",
   });
+}
+
+// Follow-ups (and, by convention, some other flows) embed the time-of-day
+// as a "[Time: HH:MM]" tag inside the notes text, since there's no
+// dedicated time column on rfq_followups for it. This pulls that tag out
+// and returns both the extracted time and the remaining clean text.
+function extractEmbeddedTime(text) {
+  if (!text) return { time: null, text: null };
+  const match = text.match(/\[Time:\s*([0-9:]+)\s*\]/i);
+  if (!match) return { time: null, text: text.trim() || null };
+  const cleaned = text.replace(match[0], "").trim();
+  return { time: match[1], text: cleaned || null };
 }
 
 function userLabel(u) {
@@ -557,4 +589,243 @@ export async function buildLifetimeActivityLog() {
     .sort((a, b) => b.totalCount - a.totalCount);
 
   return employees;
+}
+
+
+// ── Status Report — Prospect / Enquiry / Sample / Quotation status
+//    history + company-wise current snapshot ──────────────────────────
+//
+// Four chronological logs, each sorted newest-updated-first, showing WHO
+// last touched each record, plus a company-wise CURRENT STATUS SNAPSHOT
+// table built from the live tables for accuracy.
+//
+//   • Prospect status log  — from prospect_logs: prospect_status,
+//     next_action, next_action_date, and the feedback field (which the
+//     app treats as a free-text remark, and which can carry an embedded
+//     "[Time: HH:MM]" tag the same way follow-up notes do).
+//   • Enquiry status log   — from rfq_followups: contact_type (how the
+//     next contact will happen), next_action (shown as "Status", per your
+//     description), next_action's date (followup_date) and time (pulled
+//     out of the notes' embedded "[Time: HH:MM]" tag), enquiry_status,
+//     and the cleaned note text.
+//   • Sample / Quotation status logs — from sample_logs / quotation_logs:
+//     stage, result, priority, notes, next follow-up date+time.
+//
+// All four are sourced from tables/columns that are properly
+// "timestamp with time zone" EXCEPT rfq_followups.created_at, which is
+// "timestamp without time zone" — routed through toUtcDate()/fmtTime()
+// above so its display is correct regardless of runtime timezone.
+
+async function fetchAllPagedSelect(table, select, timeCol) {
+  return fetchAllPaged(table, { select, timeCol });
+}
+
+function timeOnly(iso) {
+  const full = fmtTime(iso);
+  return full.split(", ").pop() || full;
+}
+
+export async function buildStatusReport() {
+  const [prospectLogRows, followupRows, sampleLogRows, quotationLogRows] = await Promise.all([
+    fetchAllPagedSelect(
+      "prospect_logs",
+      "id, prospect_id, action, changed_by, changed_at, company_name, prospect_status, next_action, next_action_date, feedback",
+      "changed_at"
+    ),
+    fetchAllPagedSelect(
+      "rfq_followups",
+      "id, rfq_id, contact_type, next_action, notes, remark, enquiry_status, followup_date, created_by, created_at, deleted_at",
+      "created_at"
+    ),
+    fetchAllPagedSelect(
+      "sample_logs",
+      "id, sample_id, sample_status, result, priority, notes, follow_up_date, follow_up_time, updated_by, updated_at",
+      "updated_at"
+    ),
+    fetchAllPagedSelect(
+      "quotation_logs",
+      "id, quotation_id, quotation_status, result, priority, notes, follow_up_date, follow_up_time, updated_by, updated_at",
+      "updated_at"
+    ),
+  ]);
+
+  const liveFollowupRows = followupRows.filter((r) => !r.deleted_at);
+
+  // Company-name resolution
+  const sampleIds = sampleLogRows.map((r) => r.sample_id);
+  const quotationIds = quotationLogRows.map((r) => r.quotation_id);
+  const samplesMap = await fetchByIds("samples", "id, rfq_id", sampleIds);
+  const quotationsMap = await fetchByIds("quotations", "id, rfq_id", quotationIds);
+  const rfqIdsNeeded = [
+    ...liveFollowupRows.map((r) => r.rfq_id),
+    ...[...samplesMap.values()].map((s) => s.rfq_id),
+    ...[...quotationsMap.values()].map((q) => q.rfq_id),
+  ];
+  const rfqsMap = await fetchByIds("rfqs", "id, company_name", rfqIdsNeeded);
+
+  // User resolution
+  const referencedUserIds = [
+    ...prospectLogRows.map((r) => r.changed_by),
+    ...liveFollowupRows.map((r) => r.created_by),
+    ...sampleLogRows.map((r) => r.updated_by),
+    ...quotationLogRows.map((r) => r.updated_by),
+  ];
+  const usersMap = await fetchByIds("users", "id, email, first_name, last_name", referencedUserIds);
+  function who(id) {
+    if (!id) return "Unattributed";
+    return userLabel(usersMap.get(id)) || `Unknown (${id.slice(0, 8)})`;
+  }
+
+  // ── Prospect Status Log ────────────────────────────────────────────
+  const prospectStatusLog = prospectLogRows
+    .map((r) => {
+      const { time, text: remark } = extractEmbeddedTime(r.feedback);
+      return {
+        timestamp: r.changed_at,
+        dateLabel: fmtDateShort(r.changed_at),
+        timeLabel: timeOnly(r.changed_at),
+        company: r.company_name || "Unknown company",
+        status: r.prospect_status || "—",
+        nextAction: r.next_action || null,
+        nextActionDate: r.next_action_date ? fmtDateShort(r.next_action_date) : null,
+        nextActionTime: time,
+        remark,
+        updatedBy: who(r.changed_by),
+      };
+    })
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  // ── Enquiry Status Log ─────────────────────────────────────────────
+  const enquiryStatusLog = liveFollowupRows
+    .map((r) => {
+      const { time: embeddedTime, text: cleanedNote } = extractEmbeddedTime(r.notes);
+      return {
+        timestamp: r.created_at,
+        dateLabel: fmtDateShort(r.created_at),
+        timeLabel: timeOnly(r.created_at),
+        company: rfqsMap.get(r.rfq_id)?.company_name || "Unknown company",
+        status: r.next_action || r.enquiry_status || "—",
+        enquiryStatus: r.enquiry_status || null,
+        contactType: r.contact_type || null,
+        nextActionDate: r.followup_date ? fmtDateShort(r.followup_date) : null,
+        nextActionTime: embeddedTime,
+        note: cleanedNote || r.remark || null,
+        updatedBy: who(r.created_by),
+      };
+    })
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  function buildFollowUp(dateVal, timeVal) {
+    if (!dateVal) return null;
+    return timeVal ? `${fmtDateShort(dateVal)} at ${timeVal}` : fmtDateShort(dateVal);
+  }
+
+  // ── Sample Status Log ───────────────────────────────────────────────
+  const sampleStatusLog = sampleLogRows
+    .map((r) => {
+      const rfqId = samplesMap.get(r.sample_id)?.rfq_id;
+      return {
+        timestamp: r.updated_at,
+        dateLabel: fmtDateShort(r.updated_at),
+        timeLabel: timeOnly(r.updated_at),
+        company: rfqsMap.get(rfqId)?.company_name || "Unknown company",
+        stage: r.sample_status || "—",
+        result: r.result || "—",
+        priority: r.priority || "—",
+        notes: r.notes || null,
+        followUp: buildFollowUp(r.follow_up_date, r.follow_up_time),
+        updatedBy: who(r.updated_by),
+      };
+    })
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  // ── Quotation Status Log ────────────────────────────────────────────
+  const quotationStatusLog = quotationLogRows
+    .map((r) => {
+      const rfqId = quotationsMap.get(r.quotation_id)?.rfq_id;
+      return {
+        timestamp: r.updated_at,
+        dateLabel: fmtDateShort(r.updated_at),
+        timeLabel: timeOnly(r.updated_at),
+        company: rfqsMap.get(rfqId)?.company_name || "Unknown company",
+        stage: r.quotation_status || "—",
+        result: r.result || "—",
+        priority: r.priority || "—",
+        notes: r.notes || null,
+        followUp: buildFollowUp(r.follow_up_date, r.follow_up_time),
+        updatedBy: who(r.updated_by),
+      };
+    })
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  // ── Current status snapshot — built from LIVE tables for accuracy,
+  //    now including who created/last-updated the enquiry itself ───────
+  const [rfqsLive, samplesLive, quotationsLive, followupsLive] = await Promise.all([
+    fetchAllPagedSimple("rfqs", "id, company_name, sample_required, quotation_required, created_by, updated_by, deleted_at"),
+    fetchAllPagedSimple("samples", "id, rfq_id, sample_status, deleted_at"),
+    fetchAllPagedSimple("quotations", "id, rfq_id, quotation_status, deleted_at"),
+    fetchAllPagedSimple("rfq_followups", "id, rfq_id, next_action, enquiry_status, created_at, deleted_at"),
+  ]);
+
+  const aliveRfqs = rfqsLive.filter((r) => !r.deleted_at);
+
+  const rfqOwnerIds = [...new Set(aliveRfqs.flatMap((r) => [r.created_by, r.updated_by]).filter(Boolean))];
+  const rfqOwnersMap = await fetchByIds("users", "id, email, first_name, last_name", rfqOwnerIds);
+  function ownerLabel(id) {
+    if (!id) return "—";
+    return userLabel(rfqOwnersMap.get(id)) || `Unknown (${id.slice(0, 8)})`;
+  }
+
+  const sampleByRfq = new Map();
+  samplesLive.filter((s) => !s.deleted_at).forEach((s) => sampleByRfq.set(s.rfq_id, s));
+
+  const quotationByRfq = new Map();
+  quotationsLive.filter((q) => !q.deleted_at).forEach((q) => quotationByRfq.set(q.rfq_id, q));
+
+  const latestFollowupByRfq = new Map();
+  followupsLive.filter((f) => !f.deleted_at).forEach((f) => {
+    const existing = latestFollowupByRfq.get(f.rfq_id);
+    if (!existing || new Date(f.created_at) > new Date(existing.created_at)) latestFollowupByRfq.set(f.rfq_id, f);
+  });
+
+  const currentStatusTable = aliveRfqs
+    .map((rfq) => {
+      const fup = latestFollowupByRfq.get(rfq.id);
+      const sample = sampleByRfq.get(rfq.id);
+      const quotation = quotationByRfq.get(rfq.id);
+      return {
+        company: rfq.company_name || "Unknown company",
+        enquiryStatus: fup?.enquiry_status || fup?.next_action || "—",
+        sampleStatus: rfq.sample_required ? (sample?.sample_status || "Pending") : "—",
+        quotationStatus: rfq.quotation_required ? (quotation?.quotation_status || "Pending") : "—",
+        createdBy: ownerLabel(rfq.created_by),
+        updatedBy: ownerLabel(rfq.updated_by),
+      };
+    })
+    .sort((a, b) => a.company.localeCompare(b.company));
+
+  // ── Group everything by the user who did it, per your request ────────
+  // Each of the four logs above is also split into per-employee buckets
+  // (most-recently-active employee first, each employee's own entries
+  // newest-first) so the report can present "who did what" grouped by
+  // person instead of one long mixed list.
+  function groupByUpdater(entries) {
+    const buckets = new Map();
+    entries.forEach((e) => {
+      const key = e.updatedBy || "Unattributed";
+      if (!buckets.has(key)) buckets.set(key, { name: key, entries: [] });
+      buckets.get(key).entries.push(e);
+    });
+    return Array.from(buckets.values())
+      .map((b) => ({ ...b, entries: b.entries.sort((a, c) => new Date(c.timestamp) - new Date(a.timestamp)) }))
+      .sort((a, b) => new Date(b.entries[0].timestamp) - new Date(a.entries[0].timestamp));
+  }
+
+  return {
+    prospectStatusLog: groupByUpdater(prospectStatusLog),
+    enquiryStatusLog: groupByUpdater(enquiryStatusLog),
+    sampleStatusLog: groupByUpdater(sampleStatusLog),
+    quotationStatusLog: groupByUpdater(quotationStatusLog),
+    currentStatusTable,
+  };
 }
