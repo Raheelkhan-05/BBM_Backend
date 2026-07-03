@@ -8,8 +8,9 @@ import { sendMail } from "../config/mailer.js";
 // and will send to all of them (shows up as a normal multi-recipient
 // email, everyone sees each other in "To").
 const REPORT_RECIPIENTS = [
-  "jay@bbmpvtltd.com",
+  // "jay@bbmpvtltd.com",
   "communication@bbmpvtltd.com",
+  "raheelkhan.work@gmail.com",
   // "another.person@bbmpvtltd.com",
 ];
 
