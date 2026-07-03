@@ -2,6 +2,7 @@
 
 const VIEW_ALLOWED = new Set([
   "info@bbmpvtltd.com",
+  "account@bbmpvtltd.com",
   "communication@bbmpvtltd.com",
   "jay@bbmpvtltd.com",
 ]);
