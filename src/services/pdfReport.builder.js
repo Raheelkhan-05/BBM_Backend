@@ -81,14 +81,18 @@ const MARGIN = 40;
 const BOTTOM_SAFE = 70;
 
 function fmtDate(iso) {
-  return new Date(iso).toLocaleString("en-IN", {
+  const d = new Date(iso);
+  const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Kolkata",
-    day: "numeric",
-    month: "long",
+    day: "2-digit",
+    month: "2-digit",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  });
+    hour12: false,
+  }).formatToParts(d);
+  const get = (t) => parts.find((p) => p.type === t)?.value || "";
+  return `${get("day")}-${get("month")}-${get("year")}, ${get("hour")}:${get("minute")}`;
 }
 
 // Deterministic, PDF-safe destination name from arbitrary label parts.
@@ -479,8 +483,22 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
           return Math.max(labelH, measure(`${l.from} (removed)`, valueWidth, "Helvetica", 8.5));
         }
 
-        const diffHeight = lineTexts.length ? lineTexts.reduce((sum, l) => sum + diffLineHeight(l) + 4, 4) : 0;
-        const rowHeight = Math.max(24, summaryHeight + 10) + diffHeight + 12;
+        // FIX: the estimate and the actual draw increments below now use
+        // the exact same named constants — previously they used
+        // independently-chosen numbers (e.g. estimate: max(24, h+10),
+        // actual: max(16, h+6); estimate tail: +12, actual tail: 8+10=18)
+        // that didn't quite match, letting the real content drift a few
+        // points past what was budgeted. That drift is what was causing
+        // the idle-gap highlight box (and, over several entries, the
+        // start of the next record) to creep out of alignment.
+        const HEADER_MIN = 24;
+        const HEADER_GAP = 10;
+        const DIVIDER_GAP_BEFORE = 8;
+        const DIVIDER_GAP_AFTER = 10;
+
+        const headerBlockHeight = Math.max(HEADER_MIN, summaryHeight + HEADER_GAP);
+        const diffHeight = lineTexts.reduce((sum, l) => sum + diffLineHeight(l) + 4, 0);
+        const rowHeight = headerBlockHeight + diffHeight + DIVIDER_GAP_BEFORE + DIVIDER_GAP_AFTER;
 
         ensureSpace(rowHeight);
 
@@ -500,7 +518,7 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
           width: contentWidth - 222,
         });
 
-        y += Math.max(16, summaryHeight + 6);
+        y += headerBlockHeight;
 
         lineTexts.forEach((l) => {
           doc.fillColor(COLORS.text).font("Helvetica-Bold").fontSize(8.5).text(`•  ${l.label}:`, MARGIN + 232, y, {
@@ -524,9 +542,9 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
           y += diffLineHeight(l) + 4;
         });
 
-        y += 8;
+        y += DIVIDER_GAP_BEFORE;
         doc.moveTo(MARGIN, y).lineTo(pageWidth - MARGIN, y).strokeColor(COLORS.border).lineWidth(0.5).stroke();
-        y += 10;
+        y += DIVIDER_GAP_AFTER;
       });
     });
 
@@ -638,9 +656,15 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
       function drawStatusEntry(sectionColor, badgeLabel, timeLabel, dateLabel, company, lines) {
         const bulletWidth = contentWidth - 40;
         const headerWidth = contentWidth - 150;
+        const HEADER_MIN = 20;
+        const HEADER_GAP = 8;
+        const DIVIDER_GAP_BEFORE = 8;
+        const DIVIDER_GAP_AFTER = 10;
+
         const headerHeight = measure(company, headerWidth, "Helvetica-Bold", 10);
+        const headerBlockHeight = Math.max(HEADER_MIN, headerHeight + HEADER_GAP);
         const linesHeight = lines.reduce((sum, l) => sum + measure(l, bulletWidth, "Helvetica", 8.5) + 3, 0);
-        const rowHeight = Math.max(20, headerHeight + 8) + linesHeight + 12;
+        const rowHeight = headerBlockHeight + linesHeight + DIVIDER_GAP_BEFORE + DIVIDER_GAP_AFTER;
 
         ensureSpace(rowHeight);
 
@@ -653,7 +677,7 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
           width: headerWidth,
         });
 
-        y += Math.max(16, headerHeight + 6);
+        y += headerBlockHeight;
 
         lines.forEach((l) => {
           doc.fillColor(COLORS.mutedDark).font("Helvetica").fontSize(8.5).text(`•  ${l}`, MARGIN + 20, y, {
@@ -662,9 +686,9 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
           y += measure(l, bulletWidth, "Helvetica", 8.5) + 3;
         });
 
-        y += 8;
+        y += DIVIDER_GAP_BEFORE;
         doc.moveTo(MARGIN, y).lineTo(pageWidth - MARGIN, y).strokeColor(COLORS.border).lineWidth(0.5).stroke();
-        y += 10;
+        y += DIVIDER_GAP_AFTER;
       }
 
       function renderGroupedStatusLog(title, rootDestKey, groups, sectionColor, badgeLabel, buildLines, indexLabel) {

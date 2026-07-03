@@ -51,25 +51,31 @@ function fmtTime(iso) {
   if (!iso) return "";
   const d = toUtcDate(iso);
   if (!d) return "";
-  return d.toLocaleString("en-IN", {
+  const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    day: "2-digit",
-    month: "short",
-  });
+    hour12: false,
+  }).formatToParts(d);
+  const get = (t) => parts.find((p) => p.type === t)?.value || "";
+  return `${get("day")}-${get("month")}-${get("year")}, ${get("hour")}:${get("minute")}`;
 }
 
 function fmtDateShort(iso) {
   if (!iso) return "";
   const d = toUtcDate(iso);
   if (!d) return "";
-  return d.toLocaleDateString("en-IN", {
+  const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Kolkata",
     day: "2-digit",
-    month: "short",
+    month: "2-digit",
     year: "numeric",
-  });
+  }).formatToParts(d);
+  const get = (t) => parts.find((p) => p.type === t)?.value || "";
+  return `${get("day")}-${get("month")}-${get("year")}`;
 }
 
 // Follow-ups (and, by convention, some other flows) embed the time-of-day
@@ -100,7 +106,28 @@ export function fieldLabel(f) {
 function fmtVal(v) {
   if (v === null || v === undefined || v === "") return "—";
   if (typeof v === "boolean") return v ? "Yes" : "No";
-  const s = String(v);
+  let s = String(v);
+
+  // Plain date-only values (next_action_date, followup_date, etc. come
+  // through here as raw "YYYY-MM-DD") — reformat to DD-MM-YYYY generically,
+  // regardless of which field this is, so a date never shows up raw.
+  const dateOnly = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnly) {
+    return `${dateOnly[3]}-${dateOnly[2]}-${dateOnly[1]}`;
+  }
+
+  // Some notes/remark fields embed a "[Time: HH:MM]" tag representing the
+  // next action's time (see extractEmbeddedTime below) — reformat it into
+  // readable text instead of showing the raw bracket tag as-is in a diff
+  // line. (This is now a fallback: computeChangeInfo below splits this
+  // out into its own dedicated "Next Action Time" field wherever possible
+  // — this branch only fires if a tag somehow ends up on a field that
+  // wasn't split, so nothing raw ever leaks through either way.)
+  const timeMatch = s.match(/\[Time:\s*([0-9:]+)\s*\]/i);
+  if (timeMatch) {
+    const cleaned = s.replace(timeMatch[0], "").trim();
+    s = cleaned ? `${cleaned} (Time: ${timeMatch[1]})` : `Time: ${timeMatch[1]}`;
+  }
   return s.length > 80 ? s.slice(0, 77) + "…" : s;
 }
 
@@ -138,6 +165,38 @@ async function fetchByIds(table, select, ids) {
 // ascending), walks it in order, and diffs each row against the one
 // before it. Returns a Map keyed by the log row's own `id` →
 // { changeType: "Created"|"Updated"|"Deleted", changes: [{field, from, to}] }
+
+// feedback (prospects) and notes (rfq_followups/samples/quotations) can
+// carry an embedded "[Time: HH:MM]" tag representing the next action's
+// scheduled time. Rather than leaving that tag merged into the text
+// field's own diff line, this splits it out into its own dedicated
+// "next_action_time" entry — so it shows as a proper "Next Action Time:
+// HH:MM" line, not buried inside "Feedback: ...".
+function pushFieldChange(changes, field, kind, fromVal, toVal) {
+  if (field === "feedback" || field === "notes") {
+    const toInfo = kind !== "deleted" ? extractEmbeddedTime(toVal) : { time: null, text: null };
+    const fromInfo = kind !== "created" ? extractEmbeddedTime(fromVal) : { time: null, text: null };
+
+    if (kind === "created") {
+      if (toInfo.text) changes.push({ field, to: toInfo.text });
+    } else if (kind === "deleted") {
+      if (fromInfo.text) changes.push({ field, from: fromInfo.text });
+    } else {
+      if ((fromInfo.text || "") !== (toInfo.text || "")) {
+        changes.push({ field, from: fromInfo.text, to: toInfo.text });
+      }
+    }
+
+    const time = toInfo.time || fromInfo.time;
+    if (time) changes.push({ field: "next_action_time", to: time });
+    return;
+  }
+
+  if (kind === "created") changes.push({ field, to: toVal });
+  else if (kind === "deleted") changes.push({ field, from: fromVal });
+  else changes.push({ field, from: fromVal, to: toVal });
+}
+
 async function computeChangeInfo({ table, idCol, timeCol, diffFields, hasActionCol, todayRows }) {
   const resultMap = new Map();
   const ids = [...new Set(todayRows.map((r) => r[idCol]).filter(Boolean))];
@@ -178,14 +237,14 @@ async function computeChangeInfo({ table, idCol, timeCol, diffFields, hasActionC
         changeType = "Created";
         diffFields.forEach((f) => {
           if (row[f] !== null && row[f] !== undefined && row[f] !== "") {
-            changes.push({ field: f, to: row[f] });
+            pushFieldChange(changes, f, "created", undefined, row[f]);
           }
         });
       } else if (hasActionCol && row.action === "deleted") {
         changeType = "Deleted";
         diffFields.forEach((f) => {
           if (row[f] !== null && row[f] !== undefined && row[f] !== "") {
-            changes.push({ field: f, from: row[f] });
+            pushFieldChange(changes, f, "deleted", row[f], undefined);
           }
         });
       } else {
@@ -196,7 +255,7 @@ async function computeChangeInfo({ table, idCol, timeCol, diffFields, hasActionC
           const oldStr = oldVal === undefined || oldVal === null ? "" : String(oldVal);
           const newStr = newVal === undefined || newVal === null ? "" : String(newVal);
           if (oldStr !== newStr) {
-            changes.push({ field: f, from: oldVal ?? null, to: newVal ?? null });
+            pushFieldChange(changes, f, prev ? "updated" : "created", oldVal ?? null, newVal ?? null);
           }
         });
       }

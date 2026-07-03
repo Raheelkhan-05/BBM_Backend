@@ -16,12 +16,14 @@ const REPORT_RECIPIENTS = [
 ];
 
 function todayLabelIST() {
-  return new Date().toLocaleDateString("en-IN", {
+  const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Kolkata",
     day: "2-digit",
-    month: "short",
+    month: "2-digit",
     year: "numeric",
-  });
+  }).formatToParts(new Date());
+  const get = (t) => parts.find((p) => p.type === t)?.value || "";
+  return `${get("day")}-${get("month")}-${get("year")}`;
 }
 
 export async function sendDailyReport() {
