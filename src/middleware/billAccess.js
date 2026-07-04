@@ -9,6 +9,7 @@ const VIEW_ALLOWED = new Set([
 
 const UPLOAD_ALLOWED = new Set([
   "communication@bbmpvtltd.com",
+  "account@bbmpvtltd.com",
 ]);
 
 const EDIT_DELETE_ALLOWED = new Set([

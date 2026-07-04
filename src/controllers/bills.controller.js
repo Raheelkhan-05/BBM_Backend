@@ -20,6 +20,19 @@ function logBill(billId, action, changedBy, extra = {}) {
     .then(({ error }) => { if (error) console.error("bill_logs write error:", error.message); });
 }
 
+// Scans the raw sheet for the row that actually contains our known headers
+// (handles exports with letterhead/title rows above the real header, like
+// the "Sales Register (With GST & Expense)" format).
+function findHeaderRowIndex(rawRows) {
+  for (let i = 0; i < Math.min(rawRows.length, 30); i++) {
+    const row = rawRows[i] || [];
+    const normalized = row.map(c => normalizeKey(c));
+    const hits = normalized.filter(nk => KEY_MAP[nk]).length;
+    if (hits >= 2) return i; // at least 2 recognizable columns = real header row
+  }
+  return 0; // fallback: assume row 1 is the header, as before
+}
+
 /* ── Excel column mapping ──────────────────────────────────────
    Expected headers (case/space tolerant):
    Party Name | Bill No | Bill Date | Due Days | Bill Amount |
@@ -40,16 +53,31 @@ const KEY_MAP = {
   balanceamount: "balance_amount",
   mobile1: "mobile_1",
   mobile2: "mobile_2",
+  location: "location",
+  cityname: "location", // Sales Register export uses "City Name" — map it to location
+  partygstinno: "party_gstin",
+  cd: "cd_type",
 };
+
+// Converts an Excel serial date number to YYYY-MM-DD without relying on
+// XLSX.SSF (which can be undefined at runtime depending on how the "xlsx"
+// package is imported/bundled — SSF is not reliably exposed as a named export).
+function excelSerialToISO(serial) {
+  // Excel's epoch is 1899-12-30 (accounts for Excel's leap-year bug for 1900)
+  const excelEpoch = Date.UTC(1899, 11, 30);
+  const ms = excelEpoch + Math.round(serial) * 86400000;
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${mm}-${dd}`;
+}
 
 function excelDateToISO(val) {
   if (val == null || val === "") return null;
   if (typeof val === "number") {
-    const d = XLSX.SSF.parse_date_code(val);
-    if (!d) return null;
-    const mm = String(d.m).padStart(2, "0");
-    const dd = String(d.d).padStart(2, "0");
-    return `${d.y}-${mm}-${dd}`;
+    if (!isFinite(val) || val <= 0) return null;
+    return excelSerialToISO(val);
   }
   const s = String(val).trim();
   // try dd/mm/yyyy or dd-mm-yyyy
@@ -74,12 +102,19 @@ function parseRow(row) {
   }
   if (!mapped.party_name || !mapped.bill_no) return null;
 
+  const billAmount = Number(mapped.bill_amount) || 0;
+
   return {
     party_name: String(mapped.party_name).trim(),
     bill_no: String(mapped.bill_no).trim(),
     bill_date: excelDateToISO(mapped.bill_date),
-    bill_amount: Number(mapped.bill_amount) || 0,
-    balance_amount: Number(mapped.balance_amount) || 0,
+    bill_amount: billAmount,
+    // No "Balance Amt" column in the Sales Register export — treat the
+    // whole bill amount as outstanding on first import.
+    balance_amount: mapped.balance_amount !== undefined
+      ? (Number(mapped.balance_amount) || 0)
+      : billAmount,
+    location: mapped.location ? String(mapped.location).trim() : null,
     mobile_1: mapped.mobile_1 ? String(mapped.mobile_1).replace(/\D/g, "") : null,
     mobile_2: mapped.mobile_2 ? String(mapped.mobile_2).replace(/\D/g, "") : null,
   };
@@ -93,13 +128,19 @@ export const uploadBills = async (req, res) => {
 
     const wb = XLSX.read(req.file.buffer, { type: "buffer", cellDates: false });
     const sheet = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+
+    // First pass: raw array-of-arrays so we can locate the real header row
+    const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: true });
+    const headerRowIndex = findHeaderRowIndex(rawRows);
+
+    // Second pass: parse as objects using the detected header row
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", range: headerRowIndex });
 
     const parsed = [];
     const skipped = [];
     rows.forEach((r, i) => {
       const p = parseRow(r);
-      if (!p || !p.bill_date) skipped.push(i + 2); // +2 ~ excel row number incl header
+      if (!p || !p.bill_date) skipped.push(i + headerRowIndex + 2); // real excel row number incl. skipped header rows
       else parsed.push(p);
     });
 
@@ -107,42 +148,38 @@ export const uploadBills = async (req, res) => {
       return res.status(400).json({ success: false, message: "No valid rows found. Check column headers." });
     }
 
-    // Upsert on bill_no: update existing balance/amount, keep status/followup history
-    const results = { inserted: 0, updated: 0 };
+    // Existing bill numbers are left completely untouched — re-uploading
+    // only ever adds brand-new bills, never edits or overwrites one that's
+    // already in the system (status, balance, follow-up history, etc. stay as-is).
+    const results = { inserted: 0, skippedExisting: 0 };
 
     for (const bill of parsed) {
       const { data: existing } = await supabaseAdmin
         .from("bills")
-        .select("id, status")
+        .select("id")
         .eq("bill_no", bill.bill_no)
         .is("deleted_at", null)
         .maybeSingle();
 
       if (existing) {
-        const { error } = await supabaseAdmin
-          .from("bills")
-          .update({ ...bill, updated_by: userId, updated_at: nowUTC() })
-          .eq("id", existing.id);
-        if (!error) {
-          results.updated++;
-          logBill(existing.id, "uploaded", userId, { remark: "Updated via Excel re-upload" });
-        }
-      } else {
-        const { data: created, error } = await supabaseAdmin
-          .from("bills")
-          .insert([{ ...bill, status: "remaining", created_by: userId, updated_by: userId }])
-          .select("id")
-          .single();
-        if (!error && created) {
-          results.inserted++;
-          logBill(created.id, "uploaded", userId, { remark: "Created via Excel upload" });
-        }
+        results.skippedExisting++;
+        continue;
+      }
+
+      const { data: created, error } = await supabaseAdmin
+        .from("bills")
+        .insert([{ ...bill, status: "remaining", created_by: userId, updated_by: userId }])
+        .select("id")
+        .single();
+      if (!error && created) {
+        results.inserted++;
+        logBill(created.id, "uploaded", userId, { remark: "Created via Excel upload" });
       }
     }
 
     return res.json({
       success: true,
-      message: `Imported ${results.inserted} new, updated ${results.updated} bills.`,
+      message: `Imported ${results.inserted} new bill(s). Already ${results.skippedExisting} existing bill(s) in system.`,
       skippedRows: skipped,
       ...results,
     });
@@ -286,7 +323,7 @@ export const collectPayment = async (req, res) => {
 function extractBillFields(body) {
   const {
     party_name, bill_no, bill_date,
-    bill_amount, balance_amount, mobile_1, mobile_2,
+    bill_amount, balance_amount, location, mobile_1, mobile_2,
   } = body;
   return {
     party_name: (party_name || "").trim(),
@@ -296,6 +333,7 @@ function extractBillFields(body) {
     balance_amount: balance_amount !== undefined && balance_amount !== ""
       ? Number(balance_amount)
       : Number(bill_amount) || 0,
+    location: location && String(location).trim() ? String(location).trim() : null,
     mobile_1: mobile_1 ? String(mobile_1).replace(/\D/g, "") : null,
     mobile_2: mobile_2 ? String(mobile_2).replace(/\D/g, "") : null,
   };
