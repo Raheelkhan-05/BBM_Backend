@@ -9,6 +9,14 @@
 //     from today's detail, so the report can show both "what happened
 //     today" and "total work done so far".
 //
+// v4 — adds:
+//   • buildBillsReport() — a self-contained "Payment (Bill Dues)" report
+//     block (today's bill activity, lifetime per-employee summary, and a
+//     current-outstanding snapshot), sourced from bills / bill_logs /
+//     bill_deletion_logs. This is a separate feature from the
+//     prospects/leads pipeline, so it gets its own data shape, built to
+//     slot into pdfReport.builder.js using the same visual language.
+//
 // Carries forward the v2 fixes: no embedded joins for attribution
 // (explicit id → user lookups), full active-user roster always included,
 // and paginated queries so nothing silently truncates at 1000 rows.
@@ -886,5 +894,265 @@ export async function buildStatusReport() {
     sampleStatusLog: groupByUpdater(sampleStatusLog),
     quotationStatusLog: groupByUpdater(quotationStatusLog),
     currentStatusTable,
+  };
+}
+
+
+// ── Payment (Bill Dues) Report ──────────────────────────────────────────
+//
+// Bills live in bills / bill_logs / bill_deletion_logs — a separate
+// feature from the prospects/leads pipeline, with its own action set
+// (created, uploaded, followup, payment_collected, edited, deleted). This
+// builds a self-contained report block in the same shape as the sections
+// above (today's activity per employee, a lifetime per-employee summary,
+// and a current-outstanding snapshot table) so pdfReport.builder.js can
+// render it with identical formatting.
+
+function daysOutstanding(billDateStr) {
+  if (!billDateStr) return null;
+  const [y, m, d] = billDateStr.split("-").map(Number);
+  const billUTC = Date.UTC(y, m - 1, d);
+  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
+  const todayUTC = Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate());
+  return Math.round((todayUTC - billUTC) / 86400000);
+}
+
+function billDueLabel(billDateStr) {
+  const days = daysOutstanding(billDateStr);
+  if (days === null) return "—";
+  if (days > 0) return `${days}d overdue`;
+  if (days === 0) return "Due today";
+  return `in ${Math.abs(days)}d`;
+}
+
+export function fmtINR(n) {
+  const num = Number(n) || 0;
+  return `Rs. ${num.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+const BILL_ACTION_LABELS = {
+  created: "Created",
+  uploaded: "Created",
+  followup: "Follow-up",
+  payment_collected: "Payment",
+  edited: "Edited",
+  deleted: "Deleted",
+};
+
+function billActionLabel(action) {
+  return BILL_ACTION_LABELS[action] || (action ? action.charAt(0).toUpperCase() + action.slice(1) : "Updated");
+}
+
+// bill_logs "edited" rows store their diff pre-computed as a JSON string
+// in `remark` (see updateBill in bills.controller.js) — parse it back
+// into the same {field,from,to} shape the other diff engines use, so it
+// renders through the identical diff-line UI as the rest of the report.
+function parseEditedBillDiff(remark) {
+  if (!remark) return [];
+  try {
+    const obj = JSON.parse(remark);
+    return Object.entries(obj).map(([field, v]) => ({ field, from: v?.from, to: v?.to }));
+  } catch {
+    return [];
+  }
+}
+
+// For non-"edited" actions, bill_logs doesn't carry a diff — it carries
+// a handful of descriptive columns instead (reason, remark, payment
+// amount, balance after, etc). These render as plain bullet lines rather
+// than from/to diff pairs.
+function buildBillLines(log) {
+  const lines = [];
+  if (log.action === "followup") {
+    if (log.reason) lines.push(`Reason: ${log.reason}`);
+    if (log.next_followup_date) lines.push(`Next Follow-up: ${fmtDateShort(log.next_followup_date)}`);
+    if (log.remark) lines.push(`Remark: ${log.remark}`);
+  } else if (log.action === "payment_collected") {
+    lines.push(`Collected: ${fmtINR(log.payment_collected)}`);
+    lines.push(`Balance After: ${fmtINR(log.balance_after)}`);
+    if (log.status) lines.push(`Status: ${log.status === "completed" ? "Completed" : "Remaining"}`);
+    if (log.next_followup_date) lines.push(`Next Follow-up: ${fmtDateShort(log.next_followup_date)}`);
+    if (log.remark) lines.push(`Remark: ${log.remark}`);
+  } else if (log.action === "created" || log.action === "uploaded") {
+    lines.push(log.remark || "New bill added");
+  } else if (log.action === "deleted") {
+    lines.push(log.remark || "Bill permanently deleted");
+  }
+  return lines;
+}
+
+export async function buildBillsReport() {
+  const since = startOfTodayIST();
+
+  const { data: activeUsers, error: usersErr } = await supabaseAdmin
+    .from("users")
+    .select("id, email, first_name, last_name")
+    .eq("is_active", true);
+  if (usersErr) throw new Error(`users: ${usersErr.message}`);
+
+  // ── Live bills — totals + outstanding snapshot ───────────────────────
+  const liveBills = await fetchAllPagedSimple(
+    "bills",
+    "id, party_name, bill_no, bill_date, bill_amount, balance_amount, status, location, " +
+      "next_followup_date, last_reason, payment_collected, created_by, updated_by, deleted_at"
+  );
+  const aliveBills = liveBills.filter((b) => !b.deleted_at);
+  const remainingBills = aliveBills.filter((b) => b.status === "remaining");
+  const completedBills = aliveBills.filter((b) => b.status === "completed");
+  const overdueBills = remainingBills.filter((b) => daysOutstanding(b.bill_date) > 0);
+  const dueTodayBills = remainingBills.filter((b) => daysOutstanding(b.bill_date) === 0);
+
+  const totalOutstanding = remainingBills.reduce((s, b) => s + Number(b.balance_amount || 0), 0);
+  const totalCollectedAllTime = aliveBills.reduce((s, b) => s + Number(b.payment_collected || 0), 0);
+
+  const billOwnerIds = [...new Set(aliveBills.flatMap((b) => [b.created_by, b.updated_by]).filter(Boolean))];
+  const billOwnersMap = await fetchByIds("users", "id, email, first_name, last_name", billOwnerIds);
+  function billOwnerLabel(id) {
+    if (!id) return "—";
+    return userLabel(billOwnersMap.get(id)) || `Unknown (${id.slice(0, 8)})`;
+  }
+
+  const outstandingSnapshot = remainingBills
+    .map((b) => ({
+      party: b.party_name,
+      billNo: b.bill_no,
+      billDate: fmtDateShort(b.bill_date),
+      location: b.location || "—",
+      balance: fmtINR(b.balance_amount),
+      due: billDueLabel(b.bill_date),
+      daysOutstanding: daysOutstanding(b.bill_date) ?? -9999,
+      nextFollowup: b.next_followup_date ? fmtDateShort(b.next_followup_date) : "—",
+      lastReason: b.last_reason || "—",
+      createdBy: billOwnerLabel(b.created_by),
+      updatedBy: billOwnerLabel(b.updated_by),
+    }))
+    .sort((a, b) => b.daysOutstanding - a.daysOutstanding);
+
+  // ── Lifetime per-employee bill summary ────────────────────────────────
+  const lifetimeCounts = new Map();
+  activeUsers.forEach((u) => {
+    lifetimeCounts.set(u.id, { name: userLabel(u) || u.email, email: u.email, billsAdded: 0, totalCollected: 0, known: true });
+  });
+  function ensureRow(userId) {
+    if (!lifetimeCounts.has(userId)) {
+      lifetimeCounts.set(userId, {
+        name: `(inactive user ${userId.slice(0, 8)})`,
+        email: "",
+        billsAdded: 0,
+        totalCollected: 0,
+        known: false,
+      });
+    }
+    return lifetimeCounts.get(userId);
+  }
+  aliveBills.forEach((b) => {
+    if (!b.created_by) return;
+    ensureRow(b.created_by).billsAdded += 1;
+  });
+
+  // Payment collection is attributed to whoever recorded each payment log
+  // row (changed_by on the "payment_collected" bill_logs entry), not to
+  // the bill's creator — the person collecting cash is often different
+  // from whoever originally added the bill.
+  const allBillLogsForPayments = await fetchAllPagedSimple("bill_logs", "id, changed_by, action, payment_collected");
+  allBillLogsForPayments
+    .filter((l) => l.action === "payment_collected" && l.changed_by)
+    .forEach((l) => {
+      ensureRow(l.changed_by).totalCollected += Number(l.payment_collected || 0);
+    });
+
+  const lifetimeSummary = Array.from(lifetimeCounts.values())
+    .filter((r) => r.known)
+    .filter((r) => r.billsAdded > 0 || r.totalCollected > 0)
+    .sort((a, b) => b.totalCollected - a.totalCollected);
+
+  // ── Today's bill activity ─────────────────────────────────────────────
+  const todayLogs = await fetchAllPaged("bill_logs", { timeCol: "changed_at", since });
+  const billIds = [...new Set(todayLogs.map((l) => l.bill_id).filter(Boolean))];
+  const billsMap = await fetchByIds("bills", "id, party_name, bill_no", billIds);
+
+  // Today's permanent deletions — bill_deletion_logs has no changed_at
+  // column (it's deleted_at/deleted_by), and it's the only surviving
+  // record once a bill + its bill_logs are cascade-deleted, so it's the
+  // sole source for "a bill was deleted today".
+  const todayDeletions = await fetchAllPaged("bill_deletion_logs", {
+    select: "id, bill_id, deleted_by, deleted_at, snapshot",
+    timeCol: "deleted_at",
+    since,
+  });
+
+  const referencedUserIds = [
+    ...todayLogs.map((l) => l.changed_by),
+    ...todayDeletions.map((d) => d.deleted_by),
+  ];
+  const usersMap = await fetchByIds("users", "id, email, first_name, last_name", referencedUserIds);
+  activeUsers.forEach((u) => usersMap.set(u.id, u));
+
+  function makeBillEntry(userId, timestamp, action, party, lines, changes) {
+    const u = usersMap.get(userId);
+    return {
+      userId: userId || null,
+      email: u?.email || (userId ? `(deleted user ${userId.slice(0, 8)})` : "(no user recorded)"),
+      name: userLabel(u) || (userId ? u?.email || `Unknown (${userId.slice(0, 8)})` : "Unattributed"),
+      timestamp,
+      timeLabel: fmtTime(timestamp),
+      changeType: billActionLabel(action),
+      company: party || "Unknown party",
+      lines: lines || [],
+      changes: changes || [],
+    };
+  }
+
+  const billEntries = [];
+  todayLogs.forEach((log) => {
+    const bill = billsMap.get(log.bill_id);
+    const party = bill ? `${bill.party_name} (#${bill.bill_no})` : "Unknown party";
+
+    if (log.action === "edited") {
+      const changes = parseEditedBillDiff(log.remark).map((c) => ({
+        label: fieldLabel(c.field),
+        from: c.from !== undefined ? fmtVal(c.from) : null,
+        to: c.to !== undefined ? fmtVal(c.to) : null,
+      }));
+      billEntries.push(makeBillEntry(log.changed_by, log.changed_at, log.action, party, [], changes));
+    } else {
+      billEntries.push(makeBillEntry(log.changed_by, log.changed_at, log.action, party, buildBillLines(log), []));
+    }
+  });
+  todayDeletions.forEach((d) => {
+    const party = d.snapshot?.bill ? `${d.snapshot.bill.party_name} (#${d.snapshot.bill.bill_no})` : "Unknown party";
+    billEntries.push(makeBillEntry(d.deleted_by, d.deleted_at, "deleted", party, ["Bill permanently deleted"], []));
+  });
+
+  const buckets = new Map();
+  activeUsers.forEach((u) => {
+    buckets.set(u.id, { userId: u.id, email: u.email, name: userLabel(u) || u.email, entries: [] });
+  });
+  billEntries.forEach((e) => {
+    const key = e.userId || `unattributed:${e.email}`;
+    if (!buckets.has(key)) buckets.set(key, { userId: e.userId, email: e.email, name: e.name, entries: [] });
+    buckets.get(key).entries.push(e);
+  });
+
+  const allEmployees = Array.from(buckets.values()).map((emp) => ({
+    ...emp,
+    entries: emp.entries.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)),
+  }));
+
+  const todayActivity = allEmployees
+    .filter((e) => e.entries.length > 0)
+    .sort((a, b) => new Date(b.entries[0].timestamp) - new Date(a.entries[0].timestamp));
+
+  return {
+    totalOutstanding,
+    totalCollectedAllTime,
+    remainingCount: remainingBills.length,
+    completedCount: completedBills.length,
+    overdueCount: overdueBills.length,
+    dueTodayCount: dueTodayBills.length,
+    totalActionsToday: billEntries.length,
+    todayActivity,
+    lifetimeSummary,
+    outstandingSnapshot,
   };
 }

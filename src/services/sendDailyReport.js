@@ -1,6 +1,12 @@
 // services/sendDailyReport.js
 
-import { buildDailyReportData, buildLifetimeSummary, buildLifetimeActivityLog, buildStatusReport } from "./dailyReport.service.js";
+import {
+  buildDailyReportData,
+  buildLifetimeSummary,
+  buildLifetimeActivityLog,
+  buildStatusReport,
+  buildBillsReport,
+} from "./dailyReport.service.js";
 import { buildDailyReportPdf } from "./pdfReport.builder.js";
 import { sendMail } from "../config/mailer.js";
 
@@ -11,7 +17,8 @@ import { sendMail } from "../config/mailer.js";
 // recipient, even though they can't see each other).
 const REPORT_RECIPIENTS = [
   "communication@bbmpvtltd.com",
-  "jay@bbmpvtltd.com",
+  // "jay@bbmpvtltd.com",
+  "raheelkhan.work@gmail.com",
   // "someoneelse@bbmpvtltd.com",
 ];
 
@@ -26,14 +33,20 @@ function todayLabelIST() {
   return `${get("day")}-${get("month")}-${get("year")}`;
 }
 
+function fmtINR(n) {
+  const num = Number(n) || 0;
+  return `Rs. ${num.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 export async function sendDailyReport() {
-  const [reportData, lifetimeSummary, lifetimeActivityLog, statusReport] = await Promise.all([
+  const [reportData, lifetimeSummary, lifetimeActivityLog, statusReport, billsReport] = await Promise.all([
     buildDailyReportData(),
     buildLifetimeSummary(),
     buildLifetimeActivityLog(),
     buildStatusReport(),
+    buildBillsReport(),
   ]);
-  const pdfBuffer = await buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivityLog, statusReport);
+  const pdfBuffer = await buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivityLog, statusReport, billsReport);
   const dateLabel = todayLabelIST();
   const filename = `BBM-Daily-Report-${dateLabel.replace(/\s+/g, "-")}.pdf`;
 
@@ -45,6 +58,10 @@ export async function sendDailyReport() {
       lifetime contribution summary and a full all-time activity history per employee. Most recent
       activity appears first within each employee's section, with every field-level change (added /
       updated / removed) shown per action.</p>
+      <p>Also included: a <strong>Payment (Bill Dues)</strong> section — ${billsReport.totalActionsToday}
+      bill action(s) today, <strong>${fmtINR(billsReport.totalOutstanding)}</strong> currently outstanding
+      across ${billsReport.remainingCount} unpaid bill(s) (${billsReport.overdueCount} overdue), and a
+      lifetime collection summary per employee.</p>
       <p style="color:#64748b;font-size:12px">This is an automated message from BBM CRM.</p>
     </div>
   `;

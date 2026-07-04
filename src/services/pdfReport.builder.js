@@ -13,6 +13,9 @@
 //   6. Lifetime Activity Log — one sub-section per employee
 //   7. Status Updates — Prospect / Enquiry / Sample / Quotation logs,
 //      each grouped by employee, plus a Current Status Snapshot table
+//   7.5 Payment (Bill Dues) — overview stats, lifetime per-employee
+//      summary, today's bill activity per employee, and an outstanding
+//      bills snapshot table.
 //   8. Company Index — every company name that appears anywhere in the
 //      report, alphabetized, with links to every place it shows up
 //      across different people and sections.
@@ -75,6 +78,9 @@ const CHANGE_COLORS = {
   Created: "#15803d",
   Updated: "#2563eb",
   Deleted: "#be123c",
+  // Payment (Bill Dues) action types
+  Payment: "#0d9488",
+  Edited: "#2563eb",
 };
 
 const MARGIN = 40;
@@ -95,6 +101,12 @@ function fmtDate(iso) {
   return `${get("day")}-${get("month")}-${get("year")}, ${get("hour")}:${get("minute")}`;
 }
 
+// Currency formatter for the Payment (Bill Dues) section.
+function fmtINR(n) {
+  const num = Number(n) || 0;
+  return `Rs. ${num.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 // Deterministic, PDF-safe destination name from arbitrary label parts.
 function destName(...parts) {
   return parts
@@ -104,7 +116,7 @@ function destName(...parts) {
     .slice(0, 150);
 }
 
-export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivityLog = [], statusReport = null) {
+export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivityLog = [], statusReport = null, billsReport = null) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: "A4", margin: MARGIN, bufferPages: true, autoFirstPage: true });
     const chunks = [];
@@ -121,7 +133,7 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
     // Index at the very end, once every occurrence is known.
     const companyIndex = new Map();
     function indexCompany(company, sectionLabel, personLabel, dest) {
-      if (!company || company === "Unknown company") return;
+      if (!company || company === "Unknown company" || company === "Unknown party") return;
       if (!companyIndex.has(company)) companyIndex.set(company, []);
       const list = companyIndex.get(company);
       if (!list.some((e) => e.sectionLabel === sectionLabel && e.personLabel === personLabel)) {
@@ -346,6 +358,23 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
 
       y += 6;
       tocSectionTitle("Current Status Snapshot", destName("section", "current_snapshot"));
+    }
+
+    if (billsReport) {
+      y += 6;
+      tocSectionTitle("Payment (Bill Dues) — Overview", destName("section", "bills_overview"));
+
+      y += 6;
+      tocSectionTitle("Payment — Lifetime Summary", destName("section", "bills_lifetime"));
+
+      y += 6;
+      tocSectionTitle("Payment — Today's Activity", destName("section", "bills_today_root"));
+      billsReport.todayActivity.forEach((emp) => {
+        linkLine(`${emp.name}  (${emp.entries.length} action(s))`, destName("billstoday", emp.email), { indent: 16, size: 9 });
+      });
+
+      y += 6;
+      tocSectionTitle("Payment — Outstanding Snapshot", destName("section", "bills_snapshot"));
     }
 
     y += 6;
@@ -797,6 +826,268 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
           });
           y += rowH;
         });
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 7.5 PAYMENT (BILL DUES) — overview stats, lifetime per-employee
+    //     summary, today's bill activity per employee, and an
+    //     outstanding-bills snapshot table.
+    // ══════════════════════════════════════════════════════════════
+    if (billsReport) {
+      const BILL_TYPE_COLOR = "#b45309";
+
+      // ── 7.5a Overview ────────────────────────────────────────────
+      doc.addPage();
+      y = MARGIN;
+      doc.addNamedDestination(destName("section", "bills_overview"));
+      doc.outline.addItem("Payment (Bill Dues)");
+      sectionHeader("Payment (Bill Dues) — Overview", `${billsReport.totalActionsToday} action(s) today`);
+
+      const billStats = [
+        { label: "Outstanding Balance", value: fmtINR(billsReport.totalOutstanding) },
+        { label: "Total Collected (All-time)", value: fmtINR(billsReport.totalCollectedAllTime) },
+        { label: "Remaining Bills", value: String(billsReport.remainingCount) },
+        { label: "Completed Bills", value: String(billsReport.completedCount) },
+        { label: "Overdue Bills", value: String(billsReport.overdueCount) },
+        { label: "Due Today", value: String(billsReport.dueTodayCount) },
+      ];
+      const billBoxW = (contentWidth - 24) / 3;
+      billStats.forEach((s, i) => {
+        const col = i % 3;
+        const row = Math.floor(i / 3);
+        const bx = MARGIN + col * (billBoxW + 12);
+        const by = y + row * 66;
+        doc.roundedRect(bx, by, billBoxW, 58, 6).fillAndStroke(COLORS.panel, COLORS.border);
+        doc.fillColor(COLORS.accent).font("Helvetica-Bold").fontSize(14).text(s.value, bx + 14, by + 10, { width: billBoxW - 24 });
+        doc.fillColor(COLORS.mutedDark).font("Helvetica").fontSize(8).text(s.label.toUpperCase(), bx + 14, by + 38, {
+          width: billBoxW - 24,
+          characterSpacing: 0.3,
+        });
+      });
+      y += 66 * 2 + 10;
+
+      doc.font("Helvetica").fontSize(9).fillColor(COLORS.mutedDark).text(
+        "See the Lifetime Summary and Outstanding Snapshot below for a per-employee breakdown and a full list of unpaid bills, sorted most-overdue-first.",
+        MARGIN,
+        y,
+        { width: contentWidth }
+      );
+
+      // ── 7.5b Lifetime Summary ────────────────────────────────────
+      doc.addPage();
+      y = MARGIN;
+      doc.addNamedDestination(destName("section", "bills_lifetime"));
+      doc.outline.addItem("Payment — Lifetime Summary");
+      sectionHeader("Payment (Bill Dues) — Lifetime Summary", "All-time, per employee");
+
+      const billCols = [
+        { key: "name", label: "Employee", width: contentWidth * 0.4 },
+        { key: "billsAdded", label: "Bills Added", width: contentWidth * 0.25 },
+        { key: "totalCollected", label: "Total Collected", width: contentWidth * 0.35 },
+      ];
+      function billTableHeaderRow() {
+        doc.rect(MARGIN, y, contentWidth, 22).fill(COLORS.accent);
+        let cx = MARGIN;
+        billCols.forEach((c) => {
+          doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(8.5).text(c.label, cx + 6, y + 6, {
+            width: c.width - 10,
+            align: c.key === "name" ? "left" : "center",
+          });
+          cx += c.width;
+        });
+        y += 22;
+      }
+      billTableHeaderRow();
+
+      if (!billsReport.lifetimeSummary.length) {
+        ensureSpace(18);
+        doc.fillColor(COLORS.mutedDark).font("Helvetica-Oblique").fontSize(9).text("No bill activity recorded yet.", MARGIN, y + 4);
+        y += 18;
+      } else {
+        billsReport.lifetimeSummary.forEach((row, idx) => {
+          ensureSpace(20, billTableHeaderRow);
+          if (idx % 2 === 1) doc.rect(MARGIN, y, contentWidth, 18).fill(COLORS.panel);
+          let cx = MARGIN;
+          billCols.forEach((c) => {
+            const val = c.key === "name" ? row.name : c.key === "totalCollected" ? fmtINR(row.totalCollected) : String(row[c.key] || 0);
+            doc.fillColor(COLORS.text).font(c.key === "totalCollected" ? "Helvetica-Bold" : "Helvetica").fontSize(8.5).text(
+              val,
+              cx + 6,
+              y + 4,
+              { width: c.width - 10, align: c.key === "name" ? "left" : "center" }
+            );
+            cx += c.width;
+          });
+          y += 18;
+        });
+      }
+
+      // ── 7.5c Today's Bill Activity, per employee ──────────────────
+      let billsTodayOutlineParent = null;
+      billsReport.todayActivity.forEach((emp) => {
+        doc.addPage();
+        y = MARGIN;
+        const dest = destName("billstoday", emp.email);
+        doc.addNamedDestination(dest);
+        if (!billsTodayOutlineParent) {
+          doc.addNamedDestination(destName("section", "bills_today_root"));
+          billsTodayOutlineParent = doc.outline.addItem("Payment — Today's Activity");
+        }
+        billsTodayOutlineParent.addItem(emp.name);
+
+        sectionHeader(`${emp.name} — Bill Activity Today`, `${emp.email}  ·  ${emp.entries.length} action(s) today`);
+        y += 4;
+
+        emp.entries.forEach((entry) => {
+          indexCompany(entry.company, "Payment — Today's Activity", emp.name, dest);
+
+          const summaryText = entry.company;
+          const summaryHeight = measure(summaryText, contentWidth - 170, "Helvetica-Bold", 10);
+
+          const hasDiff = entry.changes && entry.changes.length > 0;
+          const lineTexts = hasDiff
+            ? entry.changes.map((c) =>
+                c.from != null && c.to != null
+                  ? { label: c.label, from: c.from, to: c.to, kind: "change" }
+                  : c.to != null
+                  ? { label: c.label, to: c.to, kind: "add" }
+                  : { label: c.label, from: c.from, kind: "remove" }
+              )
+            : (entry.lines || []).map((l) => ({ plain: l }));
+
+          const HEADER_MIN = 22;
+          const HEADER_GAP = 8;
+          const DIVIDER_GAP_BEFORE = 8;
+          const DIVIDER_GAP_AFTER = 10;
+          const headerBlockHeight = Math.max(HEADER_MIN, summaryHeight + HEADER_GAP);
+
+          const labelWidth = 130;
+          const valueWidth = contentWidth - 40 - labelWidth;
+          const bulletWidth = contentWidth - 40;
+
+          function lineHeight(l) {
+            if (l.plain !== undefined) return measure(`•  ${l.plain}`, bulletWidth, "Helvetica", 8.5);
+            const labelH = measure(`•  ${l.label}:`, labelWidth, "Helvetica-Bold", 8.5);
+            if (l.kind === "change") {
+              const half = valueWidth / 2;
+              const fromH = measure(String(l.from), half - 14, "Helvetica", 8.5);
+              const toH = measure(String(l.to), half, "Helvetica-Bold", 8.5);
+              return Math.max(labelH, fromH, toH);
+            } else if (l.kind === "add") {
+              return Math.max(labelH, measure(String(l.to), valueWidth, "Helvetica-Bold", 8.5));
+            }
+            return Math.max(labelH, measure(`${l.from} (removed)`, valueWidth, "Helvetica", 8.5));
+          }
+
+          const bodyHeight = lineTexts.reduce((sum, l) => sum + lineHeight(l) + 4, 0);
+          const rowHeight = headerBlockHeight + bodyHeight + DIVIDER_GAP_BEFORE + DIVIDER_GAP_AFTER;
+
+          ensureSpace(rowHeight);
+
+          doc.fillColor(COLORS.mutedDark).font("Helvetica").fontSize(8.5).text(entry.timeLabel, MARGIN, y, { width: 78 });
+
+          const changeColor = CHANGE_COLORS[entry.changeType] || BILL_TYPE_COLOR;
+          drawBadge(MARGIN + 82, y - 2, 78, entry.changeType, changeColor);
+
+          doc.fillColor(COLORS.text).font("Helvetica-Bold").fontSize(10).text(summaryText, MARGIN + 170, y - 1, {
+            width: contentWidth - 170,
+          });
+
+          y += headerBlockHeight;
+
+          lineTexts.forEach((l) => {
+            if (l.plain !== undefined) {
+              doc.fillColor(COLORS.mutedDark).font("Helvetica").fontSize(8.5).text(`•  ${l.plain}`, MARGIN + 20, y, {
+                width: bulletWidth,
+              });
+              y += lineHeight(l) + 4;
+              return;
+            }
+            doc.fillColor(COLORS.text).font("Helvetica-Bold").fontSize(8.5).text(`•  ${l.label}:`, MARGIN + 20, y, {
+              width: labelWidth,
+            });
+            const valueX = MARGIN + 20 + labelWidth;
+            if (l.kind === "change") {
+              const half = valueWidth / 2;
+              doc.fillColor(COLORS.removed).font("Helvetica").fontSize(8.5).text(String(l.from), valueX, y, {
+                width: half - 14,
+              });
+              drawArrow(valueX + half - 12, y);
+              doc.fillColor(COLORS.added).font("Helvetica-Bold").text(String(l.to), valueX + half, y, { width: half });
+            } else if (l.kind === "add") {
+              doc.fillColor(COLORS.added).font("Helvetica-Bold").text(String(l.to), valueX, y, { width: valueWidth });
+            } else {
+              doc.fillColor(COLORS.removed).font("Helvetica").text(`${l.from} (removed)`, valueX, y, { width: valueWidth });
+            }
+            y += lineHeight(l) + 4;
+          });
+
+          y += DIVIDER_GAP_BEFORE;
+          doc.moveTo(MARGIN, y).lineTo(pageWidth - MARGIN, y).strokeColor(COLORS.border).lineWidth(0.5).stroke();
+          y += DIVIDER_GAP_AFTER;
+        });
+      });
+
+      // ── 7.5d Outstanding Bills Snapshot ────────────────────────────
+      if (billsReport.outstandingSnapshot.length) {
+        doc.addPage();
+        y = MARGIN;
+        doc.addNamedDestination(destName("section", "bills_snapshot"));
+        doc.outline.addItem("Payment — Outstanding Snapshot");
+        sectionHeader("Payment (Bill Dues) — Outstanding Snapshot", `${billsReport.outstandingSnapshot.length} bill(s) · most overdue first`);
+
+        const snapCols2 = [
+          { key: "party", label: "Party", width: contentWidth * 0.22 },
+          { key: "billNo", label: "Bill No", width: contentWidth * 0.1 },
+          { key: "location", label: "Location", width: contentWidth * 0.13 },
+          { key: "balance", label: "Balance", width: contentWidth * 0.13 },
+          { key: "due", label: "Due", width: contentWidth * 0.12 },
+          { key: "nextFollowup", label: "Next Follow-up", width: contentWidth * 0.15 },
+          { key: "updatedBy", label: "Updated By", width: contentWidth * 0.15 },
+        ];
+        function snap2HeaderRow() {
+          doc.rect(MARGIN, y, contentWidth, 20).fill(COLORS.accent);
+          let cx = MARGIN;
+          snapCols2.forEach((c) => {
+            doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(7.5).text(c.label, cx + 5, y + 6, { width: c.width - 8 });
+            cx += c.width;
+          });
+          y += 20;
+        }
+        snap2HeaderRow();
+
+        billsReport.outstandingSnapshot.forEach((row, idx) => {
+          indexCompany(row.party, "Payment — Outstanding Snapshot", "Current Snapshot", destName("section", "bills_snapshot"));
+          const rowH = Math.max(
+            15,
+            snapCols2.reduce((m, c) => Math.max(m, measure(String(row[c.key]), c.width - 8, "Helvetica", 7.5)), 0) + 6
+          );
+          ensureSpace(rowH, snap2HeaderRow);
+          const isOverdue = row.daysOutstanding > 0;
+          if (isOverdue) doc.rect(MARGIN, y, contentWidth, rowH).fill(HIGHLIGHT_COLOR);
+          else if (idx % 2 === 1) doc.rect(MARGIN, y, contentWidth, rowH).fill(COLORS.panel);
+          let cx = MARGIN;
+          snapCols2.forEach((c) => {
+            doc.fillColor(COLORS.text).font(c.key === "party" ? "Helvetica-Bold" : "Helvetica").fontSize(7.5).text(
+              String(row[c.key]),
+              cx + 5,
+              y + 3,
+              { width: c.width - 8 }
+            );
+            cx += c.width;
+          });
+          y += rowH;
+        });
+
+        y += 8;
+        ensureSpace(14);
+        doc.fillColor(COLORS.mutedDark).font("Helvetica-Oblique").fontSize(7.5).text(
+          "Light red row = currently overdue (past bill date, unpaid)",
+          MARGIN,
+          y,
+          { width: contentWidth }
+        );
       }
     }
 
