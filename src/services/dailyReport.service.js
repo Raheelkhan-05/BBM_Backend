@@ -17,6 +17,15 @@
 //     prospects/leads pipeline, so it gets its own data shape, built to
 //     slot into pdfReport.builder.js using the same visual language.
 //
+// v5 — buildBillsReport(): "Created"/"uploaded" bill entries now show
+//   every core field (Party Name, Bill No, Bill Date, Bill Amount,
+//   Balance Amount, Location, Mobile-1, Mobile-2) as green "added" diff
+//   lines — same visual treatment as an "edited" bill's from→to diff —
+//   instead of a single generic "New bill added" remark line. bill_logs
+//   doesn't snapshot field values on creation (unlike lead_logs/
+//   prospect_logs), so these are read straight off the live bill row via
+//   an expanded billsMap select.
+//
 // Carries forward the v2 fixes: no embedded joins for attribution
 // (explicit id → user lookups), full active-user roster always included,
 // and paginated queries so nothing silently truncates at 1000 rows.
@@ -907,6 +916,13 @@ export async function buildStatusReport() {
 // above (today's activity per employee, a lifetime per-employee summary,
 // and a current-outstanding snapshot table) so pdfReport.builder.js can
 // render it with identical formatting.
+//
+// v2: "Created"/"uploaded" entries now show every core bill field as a
+// green "added" line (Party Name, Bill No, Bill Date, Bill Amount,
+// Balance Amount, Location, Mobile-1, Mobile-2) instead of a single
+// generic remark — bill_logs itself doesn't snapshot field values on
+// creation (unlike lead_logs/prospect_logs), so these are read straight
+// off the live bill row via an expanded billsMap select.
 
 function daysOutstanding(billDateStr) {
   if (!billDateStr) return null;
@@ -957,10 +973,36 @@ function parseEditedBillDiff(remark) {
   }
 }
 
-// For non-"edited" actions, bill_logs doesn't carry a diff — it carries
-// a handful of descriptive columns instead (reason, remark, payment
-// amount, balance after, etc). These render as plain bullet lines rather
-// than from/to diff pairs.
+// Every core field on the live bill row, shown as green "added" lines —
+// used for "created"/"uploaded" entries, which don't have a stored diff
+// to work from the way "edited" entries do.
+const BILL_CREATE_FIELDS = [
+  { key: "party_name", label: "Party Name" },
+  { key: "bill_no", label: "Bill No" },
+  { key: "bill_date", label: "Bill Date", isDate: true },
+  { key: "bill_amount", label: "Bill Amount", isMoney: true },
+  { key: "balance_amount", label: "Balance Amount", isMoney: true },
+  { key: "location", label: "Location" },
+  { key: "mobile_1", label: "Mobile-1" },
+  { key: "mobile_2", label: "Mobile-2" },
+];
+
+function billCreateChanges(bill) {
+  if (!bill) return [];
+  const changes = [];
+  BILL_CREATE_FIELDS.forEach(({ key, label, isDate, isMoney }) => {
+    const raw = bill[key];
+    if (raw === null || raw === undefined || raw === "") return;
+    const val = isDate ? fmtDateShort(raw) : isMoney ? fmtINR(raw) : fmtVal(raw);
+    changes.push({ label, to: val });
+  });
+  return changes;
+}
+
+// For non-"edited", non-creation actions, bill_logs doesn't carry a diff
+// — it carries a handful of descriptive columns instead (reason, remark,
+// payment amount, balance after, etc). These render as plain bullet
+// lines rather than from/to diff pairs.
 function buildBillLines(log) {
   const lines = [];
   if (log.action === "followup") {
@@ -973,8 +1015,6 @@ function buildBillLines(log) {
     if (log.status) lines.push(`Status: ${log.status === "completed" ? "Completed" : "Remaining"}`);
     if (log.next_followup_date) lines.push(`Next Follow-up: ${fmtDateShort(log.next_followup_date)}`);
     if (log.remark) lines.push(`Remark: ${log.remark}`);
-  } else if (log.action === "created" || log.action === "uploaded") {
-    lines.push(log.remark || "New bill added");
   } else if (log.action === "deleted") {
     lines.push(log.remark || "Bill permanently deleted");
   }
@@ -994,7 +1034,7 @@ export async function buildBillsReport() {
   const liveBills = await fetchAllPagedSimple(
     "bills",
     "id, party_name, bill_no, bill_date, bill_amount, balance_amount, status, location, " +
-      "next_followup_date, last_reason, payment_collected, created_by, updated_by, deleted_at"
+      "mobile_1, mobile_2, next_followup_date, last_reason, payment_collected, created_by, updated_by, deleted_at"
   );
   const aliveBills = liveBills.filter((b) => !b.deleted_at);
   const remainingBills = aliveBills.filter((b) => b.status === "remaining");
@@ -1069,7 +1109,14 @@ export async function buildBillsReport() {
   // ── Today's bill activity ─────────────────────────────────────────────
   const todayLogs = await fetchAllPaged("bill_logs", { timeCol: "changed_at", since });
   const billIds = [...new Set(todayLogs.map((l) => l.bill_id).filter(Boolean))];
-  const billsMap = await fetchByIds("bills", "id, party_name, bill_no", billIds);
+  // Expanded select — needed so "created"/"uploaded" entries can show
+  // every field the bill was created with (see billCreateChanges above),
+  // not just party_name/bill_no.
+  const billsMap = await fetchByIds(
+    "bills",
+    "id, party_name, bill_no, bill_date, bill_amount, balance_amount, location, mobile_1, mobile_2",
+    billIds
+  );
 
   // Today's permanent deletions — bill_deletion_logs has no changed_at
   // column (it's deleted_at/deleted_by), and it's the only surviving
@@ -1114,6 +1161,15 @@ export async function buildBillsReport() {
         from: c.from !== undefined ? fmtVal(c.from) : null,
         to: c.to !== undefined ? fmtVal(c.to) : null,
       }));
+      billEntries.push(makeBillEntry(log.changed_by, log.changed_at, log.action, party, [], changes));
+    } else if (log.action === "created" || log.action === "uploaded") {
+      // Show every field the bill was created with, as green "added"
+      // lines — same visual treatment as an edit's diff, just all "to"
+      // with no "from". Falls back to the old single-line remark only in
+      // the unexpected case the bill itself can no longer be found.
+      const changes = bill
+        ? billCreateChanges(bill)
+        : [{ label: "Note", to: log.remark || "New bill added" }];
       billEntries.push(makeBillEntry(log.changed_by, log.changed_at, log.action, party, [], changes));
     } else {
       billEntries.push(makeBillEntry(log.changed_by, log.changed_at, log.action, party, buildBillLines(log), []));
