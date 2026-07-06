@@ -22,20 +22,14 @@ export const sendDailyReportNow = async (req, res) => {
     return res.status(403).json({ success: false, message: "Not authorized" });
   }
 
-  // Respond right away — don't make the client wait on report generation.
-  res.status(202).json({
-    success: true,
-    message: "Report generation started. It will be emailed to jay@bbmpvtltd.com shortly.",
-  });
-
-  // Runs after the response has already been sent. Any failure here is
-  // logged server-side only, since the client has already moved on.
   try {
     const report = await sendDailyReport();
-    console.log(
-      `[reports] Manual send complete — ${report.totalActions} actions across ${report.activeToday.length} active employees.`
-    );
+    return res.status(200).json({
+      success: true,
+      message: `Report sent — ${report.totalActions} actions across ${report.activeToday.length} active employees.`,
+    });
   } catch (err) {
     console.error("[reports] Manual send failed:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
