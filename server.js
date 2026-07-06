@@ -16,6 +16,7 @@ import reportsRoutes from "./src/routes/reports.routes.js";
 import purgeRoutes from "./src/routes/purge.routes.js";
 import cronRoutes from "./src/routes/cron.routes.js";
 import billsRoutes from "./src/routes/bills.routes.js";
+import liveReportRoutes from "./src/routes/liveReport.routes.js";
 // REMOVED: import "./src/jobs/dailyReportCron.js";
 // node-cron cannot run reliably on Vercel — serverless functions don't stay
 // alive to tick through a background timer. Replaced with Vercel Cron
@@ -44,6 +45,7 @@ app.use("/api/reports", reportsRoutes);
 app.use("/api/purge", purgeRoutes);
 app.use("/api/cron", cronRoutes);
 app.use("/api/bills", billsRoutes);
+app.use("/api/reports", liveReportRoutes);
 app.get("/api/me", auth, (req, res) => {
   res.json({
     id: req.user.id,

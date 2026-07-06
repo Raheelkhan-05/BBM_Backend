@@ -5,7 +5,7 @@ import { getSamples, getSampleLogs, updateSample, getDueSamples } from "../contr
 
 const router = express.Router();
 router.use(authenticate);
-router.use(roleGuard(["Admin", "SalesCoordinator"]));
+router.use(roleGuard(["Admin", "SalesCoordinator","Salesperson"]));
 
 router.get("/due", getDueSamples); 
 router.get("/", getSamples);

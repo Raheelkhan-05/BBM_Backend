@@ -5,7 +5,7 @@ import { getQuotations, getQuotationLogs, updateQuotation, getDueQuotations  } f
 
 const router = express.Router();
 router.use(authenticate);
-router.use(roleGuard(["Admin", "SalesCoordinator"]));
+router.use(roleGuard(["Admin", "SalesCoordinator","Salesperson"]));
 
 router.get("/due", getDueQuotations);
 router.get("/", getQuotations);
