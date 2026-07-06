@@ -5,6 +5,7 @@ import {
   quotationUpdatedCoordinator,
   quotationUpdatedSalesperson,
 } from "../config/emailTemplates.js";
+import { syncRfqStatus } from "./rfq-status-sync.js"; // ⬅ NEW
 
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
@@ -73,7 +74,7 @@ export const updateQuotation = async (req, res) => {
     ] = await Promise.all([
       supabaseAdmin
         .from("quotations")
-        .select("id, rfqs(id, company_name, product_category, product_sub_category, product_name, quotation_description, created_by)")
+        .select("id, rfq_id, rfqs(id, company_name, product_category, product_sub_category, product_name, quotation_description, created_by)")
         .eq("id", id)
         .single(),
       supabaseAdmin
@@ -137,6 +138,16 @@ export const updateQuotation = async (req, res) => {
         }));
       }
     }).catch((e) => console.error("Post-update tasks error:", e.message));
+
+    // Re-derive the enquiry's next_action/status from this quotation's new
+    // state (and the sample's, if any) so the enquiry-level status stays
+    // in sync without a manual "resolve" step.
+    const rfqId = current.rfq_id || rfq.id;
+    if (rfqId) {
+      syncRfqStatus(rfqId, userId).catch((e) =>
+        console.error("syncRfqStatus (quotation):", e.message)
+      );
+    }
 
     return res.json({ success: true, quotation: updated });
   } catch (err) {

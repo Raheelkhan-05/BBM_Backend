@@ -5,6 +5,7 @@ import {
   sampleUpdatedCoordinator,
   sampleUpdatedSalesperson,
 } from "../config/emailTemplates.js";
+import { syncRfqStatus } from "./rfq-status-sync.js"; // ⬅ NEW
 
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
@@ -75,7 +76,7 @@ export const updateSample = async (req, res) => {
     ] = await Promise.all([
       supabaseAdmin
         .from("samples")
-        .select("id, rfqs(id, company_name, product_category, product_sub_category, product_name, sample_description, created_by)")
+        .select("id, rfq_id, rfqs(id, company_name, product_category, product_sub_category, product_name, sample_description, created_by)")
         .eq("id", id)
         .single(),
       supabaseAdmin
@@ -139,6 +140,16 @@ export const updateSample = async (req, res) => {
         }));
       }
     }).catch((e) => console.error("Post-update tasks error:", e.message));
+
+    // Re-derive the enquiry's next_action/status from this sample's new
+    // state (and the quotation's, if any) so the enquiry-level status
+    // stays in sync without a manual "resolve" step.
+    const rfqId = current.rfq_id || rfq.id;
+    if (rfqId) {
+      syncRfqStatus(rfqId, userId).catch((e) =>
+        console.error("syncRfqStatus (sample):", e.message)
+      );
+    }
 
     return res.json({ success: true, sample: updated });
   } catch (err) {

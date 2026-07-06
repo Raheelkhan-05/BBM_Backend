@@ -136,6 +136,7 @@ export const createRFQ = async (req, res) => {
       product_description, consumption_per_month, unit, sample_required, sample_description,
       sample_received_from_customer, quotation_required, quotation_description,
       existing_supplier_brand, notes, target_price, tds_available,
+      followup_date, followup_time,   // ⬅ MUST be sent by the form — see AddEnquiryForm below
     } = req.body;
 
     const salespersonEmail = await getSalespersonEmail(userId);
@@ -159,9 +160,12 @@ export const createRFQ = async (req, res) => {
       sideInserts.push(
         supabaseAdmin.from("samples").insert([{
           rfq_id: data.id, sample_required: true,
-          sample_status: null, follow_up_date: null, created_by: userId, updated_by: userId,
+          sample_status: null,
+          follow_up_date: followup_date || null,   // ⬅ seeded from the enquiry's first follow-up
+          follow_up_time: followup_time || null,   // ⬅ seeded likewise
+          created_by: userId, updated_by: userId,
         }]).select().single().then(({ data: s }) => {
-          if (s) logSample(s.id, "created", userId, { sample_status: null, follow_up_date: null });
+          if (s) logSample(s.id, "created", userId, { sample_status: null, follow_up_date: followup_date || null });
         })
       );
     }
@@ -169,9 +173,12 @@ export const createRFQ = async (req, res) => {
       sideInserts.push(
         supabaseAdmin.from("quotations").insert([{
           rfq_id: data.id, quotation_required: true,
-          quotation_status: null, follow_up_date: null, created_by: userId, updated_by: userId,
+          quotation_status: null,
+          follow_up_date: followup_date || null,
+          follow_up_time: followup_time || null,
+          created_by: userId, updated_by: userId,
         }]).select().single().then(({ data: q }) => {
-          if (q) logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: null });
+          if (q) logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: followup_date || null });
         })
       );
     }
