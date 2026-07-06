@@ -17,7 +17,7 @@ import { sendDailyReport } from "../services/sendDailyReport.js";
 // POST /api/reports/daily/send
 export const sendDailyReportNow = async (req, res) => {
   const { role, email } = req.user;
-  const isAuthorized = role === "Admin" || email === "communication@bbmpvtltd.com";
+  const isAuthorized = role === "Admin" || email === "communication@bbmpvtltd.com" || email === "jay@bbmpvtltd.com";
   if (!isAuthorized) {
     return res.status(403).json({ success: false, message: "Not authorized" });
   }
@@ -25,7 +25,7 @@ export const sendDailyReportNow = async (req, res) => {
   // Respond right away — don't make the client wait on report generation.
   res.status(202).json({
     success: true,
-    message: "Report generation started. It will be emailed to communication@bbmpvtltd.com shortly.",
+    message: "Report generation started. It will be emailed to jay@bbmpvtltd.com shortly.",
   });
 
   // Runs after the response has already been sent. Any failure here is
