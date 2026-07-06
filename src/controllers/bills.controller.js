@@ -21,49 +21,58 @@ function logBill(billId, action, changedBy, extra = {}) {
 }
 
 // Scans the raw sheet for the row that actually contains our known headers
-// (handles exports with letterhead/title rows above the real header, like
-// the "Sales Register (With GST & Expense)" format).
+// (handles exports with letterhead/title rows above the real header).
 function findHeaderRowIndex(rawRows) {
   for (let i = 0; i < Math.min(rawRows.length, 30); i++) {
     const row = rawRows[i] || [];
     const normalized = row.map(c => normalizeKey(c));
     const hits = normalized.filter(nk => KEY_MAP[nk]).length;
-    if (hits >= 2) return i; // at least 2 recognizable columns = real header row
+    if (hits >= 2) return i;
   }
-  return 0; // fallback: assume row 1 is the header, as before
+  return 0;
 }
 
-/* ── Excel column mapping ──────────────────────────────────────
-   Expected headers (case/space tolerant):
-   Party Name | Bill No | Bill Date | Due Days | Bill Amount |
-   Balance Amt. (Cumulative) | Mobile-1 | Mobile-2
-*/
 function normalizeKey(k) {
   return String(k || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+/* ── Column mapping for the "New Sales Dump" format ─────────────────────
+   New export columns:
+   Bill Date | Bill No | C/D | Party Name | City Name | Party GSTIN No |
+   Mobile-1 | Mobile-2 | Discount Amount | P & F Charges Amount |
+   Freight Amount | Assessable Amount | GST columns... |
+   Product Name | Product Group Name | Product Category Name | Sales Man |
+   Bill Amount
+
+   KEY DIFFERENCE from old format:
+   - Mobile-1 and Mobile-2 are now present in this export (were absent before)
+   - One row per product line item per bill — Bill Amount is the total bill
+     value repeated on every line. We deduplicate by Bill No (first row wins).
+   - No "Balance Amt" column — balance_amount starts equal to bill_amount.
+
+   Legacy column names are kept so old-format files still work.
+*/
 const KEY_MAP = {
-  partyname: "party_name",
-  billno: "bill_no",
-  billdate: "bill_date",
-  duedays: "due_days",
-  billamount: "bill_amount",
+  // New format columns
+  partyname:            "party_name",
+  billno:               "bill_no",
+  billdate:             "bill_date",
+  billamount:           "bill_amount",
+  cityname:             "location",
+  mobile1:              "mobile_1",
+  mobile2:              "mobile_2",
+  partygstinno:         "party_gstin",
+  cd:                   "cd_type",
+  // Legacy / old-format columns (kept for backward compatibility)
+  location:             "location",
+  duedays:              "due_days",
   balanceamtcumulative: "balance_amount",
-  balanceamt: "balance_amount",
-  balanceamount: "balance_amount",
-  mobile1: "mobile_1",
-  mobile2: "mobile_2",
-  location: "location",
-  cityname: "location", // Sales Register export uses "City Name" — map it to location
-  partygstinno: "party_gstin",
-  cd: "cd_type",
+  balanceamt:           "balance_amount",
+  balanceamount:        "balance_amount",
 };
 
-// Converts an Excel serial date number to YYYY-MM-DD without relying on
-// XLSX.SSF (which can be undefined at runtime depending on how the "xlsx"
-// package is imported/bundled — SSF is not reliably exposed as a named export).
 function excelSerialToISO(serial) {
-  // Excel's epoch is 1899-12-30 (accounts for Excel's leap-year bug for 1900)
+  // Excel epoch is 1899-12-30 (accounts for Excel's leap-year bug)
   const excelEpoch = Date.UTC(1899, 11, 30);
   const ms = excelEpoch + Math.round(serial) * 86400000;
   const d = new Date(ms);
@@ -75,23 +84,35 @@ function excelSerialToISO(serial) {
 
 function excelDateToISO(val) {
   if (val == null || val === "") return null;
+
+  // Primary path (raw: true + cellDates: true): XLSX gives us a JS Date object.
+  // getUTC* is correct here — XLSX sets the time portion to midnight UTC so
+  // local-timezone offsets won't shift the date by a day.
+  if (val instanceof Date) {
+    if (isNaN(val)) return null;
+    const y  = val.getUTCFullYear();
+    const mm = String(val.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(val.getUTCDate()).padStart(2, "0");
+    return `${y}-${mm}-${dd}`;
+  }
+
+  // Fallback: raw numeric Excel serial (e.g. 46114).
+  // Only reached if cellDates was somehow not applied to this cell.
   if (typeof val === "number") {
     if (!isFinite(val) || val <= 0) return null;
     return excelSerialToISO(val);
   }
-  const s = String(val).trim();
-  // try dd/mm/yyyy or dd-mm-yyyy
-  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
-  if (m) {
-    let [, d, mo, y] = m;
-    if (y.length === 2) y = "20" + y;
-    return `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
+
+  // String fallback for manually-typed dates stored as text in Excel.
+  // We only accept unambiguous ISO format (YYYY-MM-DD) to avoid
+  // DD/MM vs MM/DD ambiguity that caused the "2026-14-04" bug.
+  if (typeof val === "string") {
+    const iso = val.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (iso) return val.trim();
   }
-  const parsed = new Date(s);
-  if (!isNaN(parsed)) return parsed.toISOString().slice(0, 10);
+
   return null;
 }
-
 
 function parseRow(row) {
   const mapped = {};
@@ -100,86 +121,140 @@ function parseRow(row) {
     const target = KEY_MAP[nk];
     if (target) mapped[target] = row[rawKey];
   }
+
   if (!mapped.party_name || !mapped.bill_no) return null;
 
   const billAmount = Number(mapped.bill_amount) || 0;
 
   return {
-    party_name: String(mapped.party_name).trim(),
-    bill_no: String(mapped.bill_no).trim(),
-    bill_date: excelDateToISO(mapped.bill_date),
-    bill_amount: billAmount,
-    // No "Balance Amt" column in the Sales Register export — treat the
-    // whole bill amount as outstanding on first import.
+    party_name:     String(mapped.party_name).trim(),
+    bill_no:        String(mapped.bill_no).trim(),
+    bill_date:      excelDateToISO(mapped.bill_date),
+    bill_amount:    billAmount,
+    // New format has no Balance Amt column — full bill is outstanding on import.
+    // Old format's balance_amount is preserved when the column exists.
     balance_amount: mapped.balance_amount !== undefined
       ? (Number(mapped.balance_amount) || 0)
       : billAmount,
     location: mapped.location ? String(mapped.location).trim() : null,
-    mobile_1: mapped.mobile_1 ? String(mapped.mobile_1).replace(/\D/g, "") : null,
-    mobile_2: mapped.mobile_2 ? String(mapped.mobile_2).replace(/\D/g, "") : null,
+    // Trim to 15 chars to handle spaced phone numbers like "99989 70939"
+    mobile_1: mapped.mobile_1 ? String(mapped.mobile_1).replace(/\D/g, "").slice(0, 15) : null,
+    mobile_2: mapped.mobile_2 ? String(mapped.mobile_2).replace(/\D/g, "").slice(0, 15) : null,
   };
 }
 
-// ── POST /api/bills/upload (multipart, field name "file") ──────
+// ── POST /api/bills/upload (multipart, field name "file") ──────────────
 export const uploadBills = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded" });
     const { id: userId } = req.user;
 
-    const wb = XLSX.read(req.file.buffer, { type: "buffer", cellDates: false });
+    // cellDates: true  — date serial numbers become JS Date objects instead of numbers.
+    // raw: true (on sheet_to_json) — keeps those Date objects as-is.
+    //   ⚠️  raw: false would make XLSX format dates into locale strings like
+    //   "04/14/2026" (MM/DD/YYYY), which our regex would misread as DD/MM/YYYY
+    //   and produce an invalid "2026-14-04". Always use raw: true for the data
+    //   pass; only the header-detection pass needs raw: false so header text
+    //   comes back as readable strings.
+    const wb = XLSX.read(req.file.buffer, { type: "buffer", cellDates: true });
     const sheet = wb.Sheets[wb.SheetNames[0]];
 
-    // First pass: raw array-of-arrays so we can locate the real header row
-    const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: true });
+    // First pass: raw: false so header cell text is readable for KEY_MAP matching
+    const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false });
     const headerRowIndex = findHeaderRowIndex(rawRows);
 
-    // Second pass: parse as objects using the detected header row
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", range: headerRowIndex });
+    // Second pass: raw: true so date cells are JS Date objects, not formatted strings
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", range: headerRowIndex, raw: true });
 
+    // ── Deduplication ──────────────────────────────────────────────────
+    // The new Sales Dump format has ONE ROW PER PRODUCT LINE ITEM per bill.
+    // E.g. a bill with 3 products appears as 3 rows, all with the same
+    // Bill No and Bill Amount (the bill total, not a per-product subtotal).
+    // We keep only the FIRST row per Bill No and discard the rest.
+    const seenBillNos = new Set();
     const parsed = [];
     const skipped = [];
+
     rows.forEach((r, i) => {
       const p = parseRow(r);
-      if (!p || !p.bill_date) skipped.push(i + headerRowIndex + 2); // real excel row number incl. skipped header rows
-      else parsed.push(p);
+      const excelRowNum = i + headerRowIndex + 2; // 1-based, accounting for header
+
+      if (!p || !p.bill_date) {
+        skipped.push(excelRowNum);
+        return;
+      }
+
+      if (seenBillNos.has(p.bill_no)) {
+        // Duplicate line-item row for an already-seen bill — skip silently.
+        return;
+      }
+
+      seenBillNos.add(p.bill_no);
+      parsed.push(p);
     });
 
     if (parsed.length === 0) {
       return res.status(400).json({ success: false, message: "No valid rows found. Check column headers." });
     }
 
-    // Existing bill numbers are left completely untouched — re-uploading
-    // only ever adds brand-new bills, never edits or overwrites one that's
-    // already in the system (status, balance, follow-up history, etc. stay as-is).
-    const results = { inserted: 0, skippedExisting: 0 };
+    // ── Database insert: 2 queries total, regardless of file size ─────────
+    //
+    // OLD approach: 1 SELECT + 1 INSERT per bill = up to 234 round-trips for
+    // a 117-bill file, each one paying full network latency to Supabase.
+    //
+    // NEW approach:
+    //   Query 1 — fetch every existing bill_no in one IN() query  (~5 ms)
+    //   Query 2 — batch-insert all new bills in one call           (~10 ms)
+    //   + one fire-and-forget INSERT for bill_logs (non-blocking)
 
-    for (const bill of parsed) {
-      const { data: existing } = await supabaseAdmin
-        .from("bills")
-        .select("id")
-        .eq("bill_no", bill.bill_no)
-        .is("deleted_at", null)
-        .maybeSingle();
+    const allBillNos = parsed.map(b => b.bill_no);
 
-      if (existing) {
-        results.skippedExisting++;
-        continue;
-      }
+    const { data: existingRows } = await supabaseAdmin
+      .from("bills")
+      .select("bill_no")
+      .in("bill_no", allBillNos)
+      .is("deleted_at", null);
 
+    const existingSet = new Set((existingRows || []).map(r => r.bill_no));
+
+    const toInsert = parsed
+      .filter(b => !existingSet.has(b.bill_no))
+      .map(b => ({ ...b, status: "remaining", created_by: userId, updated_by: userId }));
+
+    const results = {
+      inserted: 0,
+      skippedExisting: existingSet.size,
+    };
+
+    if (toInsert.length > 0) {
       const { data: created, error } = await supabaseAdmin
         .from("bills")
-        .insert([{ ...bill, status: "remaining", created_by: userId, updated_by: userId }])
-        .select("id")
-        .single();
-      if (!error && created) {
-        results.inserted++;
-        logBill(created.id, "uploaded", userId, { remark: "Created via Excel upload" });
+        .insert(toInsert)
+        .select("id");
+
+      if (error) throw new Error("Batch insert failed: " + error.message);
+
+      results.inserted = created?.length ?? 0;
+
+      // Fire-and-forget: log all inserted bills without blocking the response
+      if (created?.length) {
+        supabaseAdmin.from("bill_logs").insert(
+          created.map(b => ({
+            bill_id: b.id,
+            action: "uploaded",
+            changed_by: userId,
+            changed_at: nowUTC(),
+            remark: "Created via Excel upload",
+          }))
+        ).then(({ error: logErr }) => {
+          if (logErr) console.error("bill_logs batch write error:", logErr.message);
+        });
       }
     }
 
     return res.json({
       success: true,
-      message: `Imported ${results.inserted} new bill(s). Already ${results.skippedExisting} existing bill(s) in system.`,
+      message: `Imported ${results.inserted} new bill(s). ${results.skippedExisting} already existed in system.`,
       skippedRows: skipped,
       ...results,
     });
@@ -254,9 +329,7 @@ export const addFollowup = async (req, res) => {
 };
 
 // ── PUT /api/bills/:id/payment ────────────────────────────────────
-// Body: { amount, remark }
-// controllers/bills.controller.js — replace collectPayment
-
+// Body: { amount, remark, next_followup_date }
 export const collectPayment = async (req, res) => {
   try {
     const { id } = req.params;
@@ -279,12 +352,10 @@ export const collectPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: "Amount exceeds balance" });
     }
 
-    const newBalance = Math.max(0, Number(existing.balance_amount) - amount);
+    const newBalance   = Math.max(0, Number(existing.balance_amount) - amount);
     const newCollected = Number(existing.payment_collected || 0) + amount;
-    const newStatus = newBalance <= 0 ? "completed" : "remaining";
+    const newStatus    = newBalance <= 0 ? "completed" : "remaining";
 
-    // Partial payment (balance remains) requires a next follow-up date —
-    // enforced server-side, not just in the UI.
     if (newStatus === "remaining" && !nextFollowup) {
       return res.status(400).json({ success: false, message: "Next follow-up date is required for partial payments" });
     }
@@ -292,9 +363,9 @@ export const collectPayment = async (req, res) => {
     const { data, error } = await supabaseAdmin
       .from("bills")
       .update({
-        balance_amount: newBalance,
-        payment_collected: newCollected,
-        status: newStatus,
+        balance_amount:     newBalance,
+        payment_collected:  newCollected,
+        status:             newStatus,
         next_followup_date: newStatus === "completed" ? null : nextFollowup,
         updated_by: userId,
         updated_at: nowUTC(),
@@ -308,8 +379,8 @@ export const collectPayment = async (req, res) => {
     logBill(id, "payment_collected", userId, {
       remark,
       payment_collected: amount,
-      balance_after: newBalance,
-      status: newStatus,
+      balance_after:     newBalance,
+      status:            newStatus,
       next_followup_date: newStatus === "remaining" ? nextFollowup : null,
     });
 
@@ -319,23 +390,22 @@ export const collectPayment = async (req, res) => {
   }
 };
 
-
 function extractBillFields(body) {
   const {
     party_name, bill_no, bill_date,
     bill_amount, balance_amount, location, mobile_1, mobile_2,
   } = body;
   return {
-    party_name: (party_name || "").trim(),
-    bill_no: (bill_no || "").trim(),
-    bill_date: bill_date || null,
-    bill_amount: Number(bill_amount) || 0,
+    party_name:     (party_name || "").trim(),
+    bill_no:        (bill_no || "").trim(),
+    bill_date:      bill_date || null,
+    bill_amount:    Number(bill_amount) || 0,
     balance_amount: balance_amount !== undefined && balance_amount !== ""
       ? Number(balance_amount)
       : Number(bill_amount) || 0,
-    location: location && String(location).trim() ? String(location).trim() : null,
-    mobile_1: mobile_1 ? String(mobile_1).replace(/\D/g, "") : null,
-    mobile_2: mobile_2 ? String(mobile_2).replace(/\D/g, "") : null,
+    location:  location && String(location).trim() ? String(location).trim() : null,
+    mobile_1:  mobile_1 ? String(mobile_1).replace(/\D/g, "") : null,
+    mobile_2:  mobile_2 ? String(mobile_2).replace(/\D/g, "") : null,
   };
 }
 
@@ -349,7 +419,6 @@ export const createBill = async (req, res) => {
     if (!fields.bill_no)    return res.status(400).json({ success: false, message: "Bill No is required" });
     if (!fields.bill_date)  return res.status(400).json({ success: false, message: "Bill Date is required" });
 
-    // Prevent accidental duplicate bill numbers among active (non-deleted) bills
     const { data: dupe } = await supabaseAdmin
       .from("bills")
       .select("id")
@@ -373,7 +442,6 @@ export const createBill = async (req, res) => {
 };
 
 // ── PUT /api/bills/:id ────────────────────────────────────────────
-// Full edit of a bill's core fields. Logs an "edited" entry with before/after.
 export const updateBill = async (req, res) => {
   try {
     const { id } = req.params;
@@ -392,7 +460,6 @@ export const updateBill = async (req, res) => {
       .single();
     if (fetchErr) return res.status(404).json({ success: false, message: "Bill not found" });
 
-    // Bill No uniqueness check (excluding this record)
     const { data: dupe } = await supabaseAdmin
       .from("bills")
       .select("id")
@@ -410,7 +477,6 @@ export const updateBill = async (req, res) => {
       .single();
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    // Track exactly what changed, not just that "something" changed
     const changedFields = {};
     Object.keys(fields).forEach(k => {
       if (String(before[k] ?? "") !== String(fields[k] ?? "")) {
@@ -426,12 +492,6 @@ export const updateBill = async (req, res) => {
 };
 
 // ── DELETE /api/bills/:id ───────────────────────────────────────────
-// Permanent hard delete. Before removing, snapshots the bill + its full
-// follow-up/payment history into bill_deletion_logs (a table with no FK
-// to bills, so it survives the cascade). bill_logs rows are cascade-deleted
-// along with the bill itself — that's intentional, this is a *complete*
-// permanent delete, not a soft one. The snapshot is what "properly logged"
-// deletion means here.
 export const deleteBill = async (req, res) => {
   try {
     const { id } = req.params;
@@ -453,12 +513,11 @@ export const deleteBill = async (req, res) => {
     const { error: auditErr } = await supabaseAdmin
       .from("bill_deletion_logs")
       .insert([{
-        bill_id: id,
+        bill_id:    id,
         deleted_by: userId,
-        snapshot: { bill, history: history || [] },
+        snapshot:   { bill, history: history || [] },
       }]);
     if (auditErr) {
-      // Don't proceed with a permanent delete if we failed to record the audit trail
       return res.status(500).json({ success: false, message: "Failed to log deletion, aborted: " + auditErr.message });
     }
 
