@@ -1,34 +1,4 @@
 // services/dailyReport.service.js
-//
-// v3 — adds:
-//   • Field-level change detection (Created / Updated / Deleted, with
-//     old → new values per field) by diffing each log row against the
-//     previous log row for the same entity (looking back through full
-//     history, not just today).
-//   • A lifetime (all-time) contribution summary per employee, separate
-//     from today's detail, so the report can show both "what happened
-//     today" and "total work done so far".
-//
-// v4 — adds:
-//   • buildBillsReport() — a self-contained "Payment (Bill Dues)" report
-//     block (today's bill activity, lifetime per-employee summary, and a
-//     current-outstanding snapshot), sourced from bills / bill_logs /
-//     bill_deletion_logs. This is a separate feature from the
-//     prospects/leads pipeline, so it gets its own data shape, built to
-//     slot into pdfReport.builder.js using the same visual language.
-//
-// v5 — buildBillsReport(): "Created"/"uploaded" bill entries now show
-//   every core field (Party Name, Bill No, Bill Date, Bill Amount,
-//   Balance Amount, Location, Mobile-1, Mobile-2) as green "added" diff
-//   lines — same visual treatment as an "edited" bill's from→to diff —
-//   instead of a single generic "New bill added" remark line. bill_logs
-//   doesn't snapshot field values on creation (unlike lead_logs/
-//   prospect_logs), so these are read straight off the live bill row via
-//   an expanded billsMap select.
-//
-// Carries forward the v2 fixes: no embedded joins for attribution
-// (explicit id → user lookups), full active-user roster always included,
-// and paginated queries so nothing silently truncates at 1000 rows.
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -48,16 +18,6 @@ function startOfTodayIST() {
   return new Date(istNow.getTime() - IST_OFFSET_MS).toISOString();
 }
 
-// Several MAIN tables (prospects, leads, rfqs, samples, quotations,
-// rfq_followups) store created_at/updated_at as Postgres "timestamp
-// WITHOUT time zone" — unlike every *_logs table, which correctly uses
-// "timestamp WITH time zone". Values from a tz-less column come back from
-// Supabase with no "Z"/offset suffix at all, and JS's Date constructor
-// can then ambiguously treat that as local time instead of UTC depending
-// on the runtime's own timezone — this was the exact cause of follow-up
-// times showing hours off (e.g. a 10:48 AM IST action displaying as
-// 5:17 AM). Forcing an explicit "Z" whenever no timezone marker is
-// present makes the interpretation unambiguous regardless of runtime tz.
 function toUtcDate(raw) {
   if (!raw) return null;
   const hasTz = /Z$|[+-]\d{2}:?\d{2}$/.test(raw);
@@ -95,10 +55,6 @@ function fmtDateShort(iso) {
   return `${get("day")}-${get("month")}-${get("year")}`;
 }
 
-// Follow-ups (and, by convention, some other flows) embed the time-of-day
-// as a "[Time: HH:MM]" tag inside the notes text, since there's no
-// dedicated time column on rfq_followups for it. This pulls that tag out
-// and returns both the extracted time and the remaining clean text.
 function extractEmbeddedTime(text) {
   if (!text) return { time: null, text: null };
   const match = text.match(/\[Time:\s*([0-9:]+)\s*\]/i);
@@ -125,21 +81,11 @@ function fmtVal(v) {
   if (typeof v === "boolean") return v ? "Yes" : "No";
   let s = String(v);
 
-  // Plain date-only values (next_action_date, followup_date, etc. come
-  // through here as raw "YYYY-MM-DD") — reformat to DD-MM-YYYY generically,
-  // regardless of which field this is, so a date never shows up raw.
   const dateOnly = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (dateOnly) {
     return `${dateOnly[3]}-${dateOnly[2]}-${dateOnly[1]}`;
   }
 
-  // Some notes/remark fields embed a "[Time: HH:MM]" tag representing the
-  // next action's time (see extractEmbeddedTime below) — reformat it into
-  // readable text instead of showing the raw bracket tag as-is in a diff
-  // line. (This is now a fallback: computeChangeInfo below splits this
-  // out into its own dedicated "Next Action Time" field wherever possible
-  // — this branch only fires if a tag somehow ends up on a field that
-  // wasn't split, so nothing raw ever leaks through either way.)
   const timeMatch = s.match(/\[Time:\s*([0-9:]+)\s*\]/i);
   if (timeMatch) {
     const cleaned = s.replace(timeMatch[0], "").trim();
@@ -177,18 +123,6 @@ async function fetchByIds(table, select, ids) {
   return map;
 }
 
-// ── Field-level diff engine ─────────────────────────────────────────────
-// For each entity touched today, pulls its FULL log history (all time,
-// ascending), walks it in order, and diffs each row against the one
-// before it. Returns a Map keyed by the log row's own `id` →
-// { changeType: "Created"|"Updated"|"Deleted", changes: [{field, from, to}] }
-
-// feedback (prospects) and notes (rfq_followups/samples/quotations) can
-// carry an embedded "[Time: HH:MM]" tag representing the next action's
-// scheduled time. Rather than leaving that tag merged into the text
-// field's own diff line, this splits it out into its own dedicated
-// "next_action_time" entry — so it shows as a proper "Next Action Time:
-// HH:MM" line, not buried inside "Feedback: ...".
 function pushFieldChange(changes, field, kind, fromVal, toVal) {
   if (field === "feedback" || field === "notes") {
     const toInfo = kind !== "deleted" ? extractEmbeddedTime(toVal) : { time: null, text: null };
@@ -443,27 +377,6 @@ export async function buildDailyReportData() {
   };
 }
 
-
-// ── Lifetime (all-time) contribution summary ────────────────────────────
-//
-// v4 — rewritten to count DISTINCT LIVE RECORDS by created_by, straight
-// from the live tables, instead of counting log-table ACTIONS (creates +
-// every subsequent update). The action-based approach was producing
-// inflated, hard-to-reconcile numbers for two reasons:
-//
-//   1. A single record updated multiple times generated multiple log
-//      rows, all attributed to whoever made each update — so "Prospects: 40"
-//      could mean far fewer than 40 actual prospects, just more edits.
-//   2. A prospect that gets converted to a lead was counted as BOTH a
-//      "Prospect" (from its prospect_logs history) AND a "Lead" (from its
-//      lead_logs history) — double-counting the same underlying record.
-//
-// This version fixes both: it counts each live (non-deleted) record
-// exactly once, attributed to created_by, and — per spec — a converted
-// prospect is counted only under Leads, not under Prospects at all.
-// This also means the numbers here now match exactly what you'd count by
-// hand in the Pipeline UI.
-
 async function fetchAllPagedSimple(table, select) {
   let all = [];
   let from = 0;
@@ -492,10 +405,6 @@ export async function buildLifetimeSummary() {
   function bump(userId, label) {
     if (!userId) return;
     if (!counts.has(userId)) {
-      // Record created by a user not in the current active roster
-      // (deactivated or otherwise unknown). Tracked as known:false so it
-      // can be excluded from the final output below, per your request
-      // not to show "(inactive user ...)" rows in the report.
       counts.set(userId, { name: `(inactive user ${userId.slice(0, 8)})`, email: "", total: 0, known: false });
     }
     const row = counts.get(userId);
@@ -514,8 +423,6 @@ export async function buildLifetimeSummary() {
 
   const aliveLeads = leadsRows.filter((l) => !l.deleted_at);
 
-  // Every prospect_id that currently has a live lead pointing at it —
-  // these are "converted" and must NOT also be counted as a Prospect.
   const convertedProspectIds = new Set(aliveLeads.filter((l) => l.prospect_id).map((l) => l.prospect_id));
 
   aliveLeads.forEach((l) => bump(l.created_by, "Leads"));
@@ -536,24 +443,8 @@ export async function buildLifetimeSummary() {
 }
 
 
-// ── Lifetime Activity Log — condensed, all-time, per employee ───────────
-//
-// Unlike buildDailyReportData (today only, with full field-level diffs),
-// this pulls each employee's ENTIRE history across all six log tables,
-// but keeps every entry to a single condensed line — date, time, action,
-// entity type, and company — with NO field-by-field diff detail. That
-// level of detail belongs in the "today" section; here the point is a
-// scannable record of "what has this person done, over all time."
-//
-// A per-employee cap keeps the PDF from becoming unmanageable for anyone
-// with months/years of history — the most recent N are shown, with a
-// note if older entries were left out.
 const LIFETIME_LOG_CAP_PER_EMPLOYEE = 300;
 
-// For tables without an `action` column (sample_logs, quotation_logs):
-// classify the first log row per entity as "Created", everything after
-// as "Updated" — same logic as the daily diff engine, but without doing
-// the (expensive, unnecessary here) full field-by-field diff.
 function classifyByFirstInGroup(rows, idCol, timeCol) {
   const groups = new Map();
   rows.forEach((r) => {
@@ -590,9 +481,6 @@ export async function buildLifetimeActivityLog() {
     fetchAllPaged("quotation_logs",    { select: "id, quotation_id, updated_by, updated_at", timeCol: "updated_at" }),
   ]);
 
-  // Company-name resolution — only resolves for records that still
-  // currently exist; anything since deleted shows as "Unknown company"
-  // since there's nothing left to look up (the action itself still shows).
   const sampleIds = sampleLogs.map((r) => r.sample_id);
   const quotationIds = quotationLogs.map((r) => r.quotation_id);
   const samplesMap = await fetchByIds("samples", "id, rfq_id", sampleIds);
@@ -667,31 +555,6 @@ export async function buildLifetimeActivityLog() {
   return employees;
 }
 
-
-// ── Status Report — Prospect / Enquiry / Sample / Quotation status
-//    history + company-wise current snapshot ──────────────────────────
-//
-// Four chronological logs, each sorted newest-updated-first, showing WHO
-// last touched each record, plus a company-wise CURRENT STATUS SNAPSHOT
-// table built from the live tables for accuracy.
-//
-//   • Prospect status log  — from prospect_logs: prospect_status,
-//     next_action, next_action_date, and the feedback field (which the
-//     app treats as a free-text remark, and which can carry an embedded
-//     "[Time: HH:MM]" tag the same way follow-up notes do).
-//   • Enquiry status log   — from rfq_followups: contact_type (how the
-//     next contact will happen), next_action (shown as "Status", per your
-//     description), next_action's date (followup_date) and time (pulled
-//     out of the notes' embedded "[Time: HH:MM]" tag), enquiry_status,
-//     and the cleaned note text.
-//   • Sample / Quotation status logs — from sample_logs / quotation_logs:
-//     stage, result, priority, notes, next follow-up date+time.
-//
-// All four are sourced from tables/columns that are properly
-// "timestamp with time zone" EXCEPT rfq_followups.created_at, which is
-// "timestamp without time zone" — routed through toUtcDate()/fmtTime()
-// above so its display is correct regardless of runtime timezone.
-
 async function fetchAllPagedSelect(table, select, timeCol) {
   return fetchAllPaged(table, { select, timeCol });
 }
@@ -752,16 +615,19 @@ export async function buildStatusReport() {
     return userLabel(usersMap.get(id)) || `Unknown (${id.slice(0, 8)})`;
   }
 
-  // ── Prospect Status Log ────────────────────────────────────────────
+// ── Prospect Status Log ────────────────────────────────────────────
   const prospectStatusLog = prospectLogRows
     .map((r) => {
       const { time, text: remark } = extractEmbeddedTime(r.feedback);
+      const status = r.prospect_status || "—";
       return {
         timestamp: r.changed_at,
         dateLabel: fmtDateShort(r.changed_at),
         timeLabel: timeOnly(r.changed_at),
         company: r.company_name || "Unknown company",
-        status: r.prospect_status || "—",
+        status,
+        statusGroup: status,
+        dueDateRaw: r.next_action_date || null,
         nextAction: r.next_action || null,
         nextActionDate: r.next_action_date ? fmtDateShort(r.next_action_date) : null,
         nextActionTime: time,
@@ -775,12 +641,15 @@ export async function buildStatusReport() {
   const enquiryStatusLog = liveFollowupRows
     .map((r) => {
       const { time: embeddedTime, text: cleanedNote } = extractEmbeddedTime(r.notes);
+      const status = r.next_action || r.enquiry_status || "—";
       return {
         timestamp: r.created_at,
         dateLabel: fmtDateShort(r.created_at),
         timeLabel: timeOnly(r.created_at),
         company: rfqsMap.get(r.rfq_id)?.company_name || "Unknown company",
-        status: r.next_action || r.enquiry_status || "—",
+        status,
+        statusGroup: status,
+        dueDateRaw: r.followup_date || null,
         enquiryStatus: r.enquiry_status || null,
         contactType: r.contact_type || null,
         nextActionDate: r.followup_date ? fmtDateShort(r.followup_date) : null,
@@ -800,12 +669,15 @@ export async function buildStatusReport() {
   const sampleStatusLog = sampleLogRows
     .map((r) => {
       const rfqId = samplesMap.get(r.sample_id)?.rfq_id;
+      const stage = r.sample_status || "—";
       return {
         timestamp: r.updated_at,
         dateLabel: fmtDateShort(r.updated_at),
         timeLabel: timeOnly(r.updated_at),
         company: rfqsMap.get(rfqId)?.company_name || "Unknown company",
-        stage: r.sample_status || "—",
+        stage,
+        statusGroup: stage,
+        dueDateRaw: r.follow_up_date || null,
         result: r.result || "—",
         priority: r.priority || "—",
         notes: r.notes || null,
@@ -819,12 +691,15 @@ export async function buildStatusReport() {
   const quotationStatusLog = quotationLogRows
     .map((r) => {
       const rfqId = quotationsMap.get(r.quotation_id)?.rfq_id;
+      const stage = r.quotation_status || "—";
       return {
         timestamp: r.updated_at,
         dateLabel: fmtDateShort(r.updated_at),
         timeLabel: timeOnly(r.updated_at),
         company: rfqsMap.get(rfqId)?.company_name || "Unknown company",
-        stage: r.quotation_status || "—",
+        stage,
+        statusGroup: stage,
+        dueDateRaw: r.follow_up_date || null,
         result: r.result || "—",
         priority: r.priority || "—",
         notes: r.notes || null,
@@ -880,49 +755,73 @@ export async function buildStatusReport() {
     })
     .sort((a, b) => a.company.localeCompare(b.company));
 
-  // ── Group everything by the user who did it, per your request ────────
-  // Each of the four logs above is also split into per-employee buckets
-  // (most-recently-active employee first, each employee's own entries
-  // newest-first) so the report can present "who did what" grouped by
-  // person instead of one long mixed list.
-  function groupByUpdater(entries) {
+  // Groups entries three levels deep: user → status → nearest due date.
+  // "Due date" is whatever field each log type uses for "next action
+  // needed" (next_action_date / followup_date / follow_up_date). Entries
+  // with no due date sink to the bottom of their status group; status
+  // groups with no due-dated entries at all sink to the bottom too.
+  function sortByNearestDue(entries) {
+    return [...entries].sort((a, b) => {
+      if (a.dueDateRaw && b.dueDateRaw) {
+        const diff = new Date(a.dueDateRaw) - new Date(b.dueDateRaw);
+        if (diff !== 0) return diff;
+        return new Date(b.timestamp) - new Date(a.timestamp);
+      }
+      if (a.dueDateRaw && !b.dueDateRaw) return -1;
+      if (!a.dueDateRaw && b.dueDateRaw) return 1;
+      return new Date(b.timestamp) - new Date(a.timestamp);
+    });
+  }
+
+  function groupByUpdaterWithStatus(entries) {
     const buckets = new Map();
     entries.forEach((e) => {
       const key = e.updatedBy || "Unattributed";
       if (!buckets.has(key)) buckets.set(key, { name: key, entries: [] });
       buckets.get(key).entries.push(e);
     });
+
     return Array.from(buckets.values())
-      .map((b) => ({ ...b, entries: b.entries.sort((a, c) => new Date(c.timestamp) - new Date(a.timestamp)) }))
+      .map((b) => {
+        const entriesByTime = [...b.entries].sort((a, c) => new Date(c.timestamp) - new Date(a.timestamp));
+
+        const statusMap = new Map();
+        b.entries.forEach((e) => {
+          const key = e.statusGroup || "—";
+          if (!statusMap.has(key)) statusMap.set(key, []);
+          statusMap.get(key).push(e);
+        });
+
+        const statusGroups = Array.from(statusMap.entries())
+          .map(([status, list]) => {
+            const sorted = sortByNearestDue(list);
+            return {
+              status,
+              entries: sorted,
+              count: sorted.length,
+              nearestDue: sorted.find((e) => e.dueDateRaw)?.dueDateRaw || null,
+            };
+          })
+          .sort((a, c) => {
+            if (a.nearestDue && c.nearestDue) return new Date(a.nearestDue) - new Date(c.nearestDue);
+            if (a.nearestDue && !c.nearestDue) return -1;
+            if (!a.nearestDue && c.nearestDue) return 1;
+            return a.status.localeCompare(c.status);
+          });
+
+        return { name: b.name, entries: entriesByTime, statusGroups };
+      })
       .sort((a, b) => new Date(b.entries[0].timestamp) - new Date(a.entries[0].timestamp));
   }
 
   return {
-    prospectStatusLog: groupByUpdater(prospectStatusLog),
-    enquiryStatusLog: groupByUpdater(enquiryStatusLog),
-    sampleStatusLog: groupByUpdater(sampleStatusLog),
-    quotationStatusLog: groupByUpdater(quotationStatusLog),
+    prospectStatusLog: groupByUpdaterWithStatus(prospectStatusLog),
+    enquiryStatusLog: groupByUpdaterWithStatus(enquiryStatusLog),
+    sampleStatusLog: groupByUpdaterWithStatus(sampleStatusLog),
+    quotationStatusLog: groupByUpdaterWithStatus(quotationStatusLog),
     currentStatusTable,
   };
 }
-
-
-// ── Payment (Bill Dues) Report ──────────────────────────────────────────
-//
-// Bills live in bills / bill_logs / bill_deletion_logs — a separate
-// feature from the prospects/leads pipeline, with its own action set
-// (created, uploaded, followup, payment_collected, edited, deleted). This
-// builds a self-contained report block in the same shape as the sections
-// above (today's activity per employee, a lifetime per-employee summary,
-// and a current-outstanding snapshot table) so pdfReport.builder.js can
-// render it with identical formatting.
-//
-// v2: "Created"/"uploaded" entries now show every core bill field as a
-// green "added" line (Party Name, Bill No, Bill Date, Bill Amount,
-// Balance Amount, Location, Mobile-1, Mobile-2) instead of a single
-// generic remark — bill_logs itself doesn't snapshot field values on
-// creation (unlike lead_logs/prospect_logs), so these are read straight
-// off the live bill row via an expanded billsMap select.
 
 function daysOutstanding(billDateStr) {
   if (!billDateStr) return null;
@@ -959,10 +858,6 @@ function billActionLabel(action) {
   return BILL_ACTION_LABELS[action] || (action ? action.charAt(0).toUpperCase() + action.slice(1) : "Updated");
 }
 
-// bill_logs "edited" rows store their diff pre-computed as a JSON string
-// in `remark` (see updateBill in bills.controller.js) — parse it back
-// into the same {field,from,to} shape the other diff engines use, so it
-// renders through the identical diff-line UI as the rest of the report.
 function parseEditedBillDiff(remark) {
   if (!remark) return [];
   try {
@@ -973,9 +868,6 @@ function parseEditedBillDiff(remark) {
   }
 }
 
-// Every core field on the live bill row, shown as green "added" lines —
-// used for "created"/"uploaded" entries, which don't have a stored diff
-// to work from the way "edited" entries do.
 const BILL_CREATE_FIELDS = [
   { key: "party_name", label: "Party Name" },
   { key: "bill_no", label: "Bill No" },
@@ -999,10 +891,6 @@ function billCreateChanges(bill) {
   return changes;
 }
 
-// For non-"edited", non-creation actions, bill_logs doesn't carry a diff
-// — it carries a handful of descriptive columns instead (reason, remark,
-// payment amount, balance after, etc). These render as plain bullet
-// lines rather than from/to diff pairs.
 function buildBillLines(log) {
   const lines = [];
   if (log.action === "followup") {
@@ -1090,10 +978,6 @@ export async function buildBillsReport() {
     ensureRow(b.created_by).billsAdded += 1;
   });
 
-  // Payment collection is attributed to whoever recorded each payment log
-  // row (changed_by on the "payment_collected" bill_logs entry), not to
-  // the bill's creator — the person collecting cash is often different
-  // from whoever originally added the bill.
   const allBillLogsForPayments = await fetchAllPagedSimple("bill_logs", "id, changed_by, action, payment_collected");
   allBillLogsForPayments
     .filter((l) => l.action === "payment_collected" && l.changed_by)
@@ -1118,10 +1002,6 @@ export async function buildBillsReport() {
     billIds
   );
 
-  // Today's permanent deletions — bill_deletion_logs has no changed_at
-  // column (it's deleted_at/deleted_by), and it's the only surviving
-  // record once a bill + its bill_logs are cascade-deleted, so it's the
-  // sole source for "a bill was deleted today".
   const todayDeletions = await fetchAllPaged("bill_deletion_logs", {
     select: "id, bill_id, deleted_by, deleted_at, snapshot",
     timeCol: "deleted_at",

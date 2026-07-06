@@ -682,7 +682,7 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
       // estimate and the actual render (both use `bulletWidth`) —
       // previously these used different widths (safe direction, but
       // inconsistent and imprecise).
-      function drawStatusEntry(sectionColor, badgeLabel, timeLabel, dateLabel, company, lines) {
+      function drawStatusEntry(sectionColor, badgeLabel, timeLabel, dateLabel, company, lines, onNewPage) {
         const bulletWidth = contentWidth - 40;
         const headerWidth = contentWidth - 150;
         const HEADER_MIN = 20;
@@ -695,7 +695,7 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
         const linesHeight = lines.reduce((sum, l) => sum + measure(l, bulletWidth, "Helvetica", 8.5) + 3, 0);
         const rowHeight = headerBlockHeight + linesHeight + DIVIDER_GAP_BEFORE + DIVIDER_GAP_AFTER;
 
-        ensureSpace(rowHeight);
+        ensureSpace(rowHeight, onNewPage);
 
         doc.fillColor(COLORS.mutedDark).font("Helvetica").fontSize(8).text(timeLabel, MARGIN, y, { width: 70 });
         doc.fillColor(COLORS.mutedDark).text(dateLabel, MARGIN, y + 10, { width: 70 });
@@ -720,6 +720,19 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
         y += DIVIDER_GAP_AFTER;
       }
 
+      function statusGroupHeader(label, count, onNewPage) {
+        ensureSpace(26, onNewPage);
+        doc.rect(MARGIN, y, contentWidth, 20).fill(COLORS.panel);
+        doc.moveTo(MARGIN, y).lineTo(MARGIN, y + 20).lineWidth(3).strokeColor(COLORS.accent).stroke();
+        doc.fillColor(COLORS.dark).font("Helvetica-Bold").fontSize(9.5).text(
+          `${label}  (${count})`,
+          MARGIN + 10,
+          y + 5,
+          { width: contentWidth - 20 }
+        );
+        y += 26;
+      }
+
       function renderGroupedStatusLog(title, rootDestKey, groups, sectionColor, badgeLabel, buildLines, indexLabel) {
         if (!groups.length) return;
         let parent = null;
@@ -734,10 +747,20 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
           }
           parent.addItem(group.name);
 
-          sectionHeader(`${title} — ${group.name}`, `${group.entries.length} update(s) · newest first`);
-          group.entries.forEach((entry) => {
-            indexCompany(entry.company, title, group.name, dest);
-            drawStatusEntry(sectionColor, badgeLabel, entry.timeLabel, entry.dateLabel, entry.company, buildLines(entry));
+          sectionHeader(`${title} — ${group.name}`, `${group.entries.length} update(s) · grouped by status, nearest due date first`);
+
+          group.statusGroups.forEach((sg) => {
+            // Reprints "Status (cont'd)" if a page break lands inside
+            // this status group — either at the header itself or partway
+            // through its entries — so a reader landing mid-group still
+            // knows what they're looking at.
+            const reprintHeader = () => statusGroupHeader(`${sg.status} (cont'd)`, sg.count);
+            statusGroupHeader(sg.status, sg.count, reprintHeader);
+
+            sg.entries.forEach((entry) => {
+              indexCompany(entry.company, title, group.name, dest);
+              drawStatusEntry(sectionColor, badgeLabel, entry.timeLabel, entry.dateLabel, entry.company, buildLines(entry), reprintHeader);
+            });
           });
         });
       }

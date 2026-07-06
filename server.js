@@ -17,12 +17,7 @@ import purgeRoutes from "./src/routes/purge.routes.js";
 import cronRoutes from "./src/routes/cron.routes.js";
 import billsRoutes from "./src/routes/bills.routes.js";
 import liveReportRoutes from "./src/routes/liveReport.routes.js";
-// REMOVED: import "./src/jobs/dailyReportCron.js";
-// node-cron cannot run reliably on Vercel — serverless functions don't stay
-// alive to tick through a background timer. Replaced with Vercel Cron
-// Jobs (see vercel.json), which calls GET /api/cron/daily-report on a
-// schedule instead. You can delete src/jobs/dailyReportCron.js entirely,
-// or leave it unimported as dead code — either is fine, just don't import it.
+import ordersRouter from "./src/routes/orders.routes.js";
 
 dotenv.config();
 
@@ -46,6 +41,7 @@ app.use("/api/purge", purgeRoutes);
 app.use("/api/cron", cronRoutes);
 app.use("/api/bills", billsRoutes);
 app.use("/api/reports", liveReportRoutes);
+app.use("/api/orders", ordersRouter);
 app.get("/api/me", auth, (req, res) => {
   res.json({
     id: req.user.id,
