@@ -184,14 +184,19 @@ async function computeChangeInfo({ table, idCol, timeCol, diffFields, hasActionC
       const changes = [];
       let changeType;
 
-      if (hasActionCol && row.action === "created") {
-        changeType = "Created";
+      // "migrated_*" actions (from the prospect→lead backfill) are
+      // treated the same as their base action for diffing purposes —
+      // stripped of the prefix just for the label shown to the reader.
+      const baseAction = (row.action || "").replace(/^migrated_/, "");
+
+      if (hasActionCol && baseAction === "created") {
+        changeType = row.action?.startsWith("migrated_") ? "Migrated" : "Created";
         diffFields.forEach((f) => {
           if (row[f] !== null && row[f] !== undefined && row[f] !== "") {
             pushFieldChange(changes, f, "created", undefined, row[f]);
           }
         });
-      } else if (hasActionCol && row.action === "deleted") {
+      } else if (hasActionCol && baseAction === "deleted") {
         changeType = "Deleted";
         diffFields.forEach((f) => {
           if (row[f] !== null && row[f] !== undefined && row[f] !== "") {
@@ -199,7 +204,7 @@ async function computeChangeInfo({ table, idCol, timeCol, diffFields, hasActionC
           }
         });
       } else {
-        changeType = prev ? "Updated" : "Created";
+        changeType = prev ? "Updated" : (row.action?.startsWith("migrated_") ? "Migrated" : "Created");
         diffFields.forEach((f) => {
           const oldVal = prev ? prev[f] : undefined;
           const newVal = row[f];
@@ -219,7 +224,12 @@ async function computeChangeInfo({ table, idCol, timeCol, diffFields, hasActionC
   return resultMap;
 }
 
-// ── Diff field sets per table (matches your schema, metadata columns excluded) ──
+// ── Diff field sets per table ───────────────────────────────────────────
+// `prospects`/`prospect_logs` are retired from active reporting — every
+// record (prospect-stage or lead-stage) now lives in `leads`/`lead_logs`.
+// The prospect-stage fields (source/next_action/next_action_date/feedback/
+// status) were added onto `leads`/`lead_logs` directly (see migration),
+// so lead_logs' diff set now covers the full lifecycle of a record.
 const DIFF_FIELDS = {
   lead_logs: [
     "company_name", "country", "state", "city", "zone", "route",
@@ -228,11 +238,7 @@ const DIFF_FIELDS = {
     "nature_of_business", "manufacturing_industry", "company_website", "gst_number",
     "linkedin_profile", "potential_product_category", "potential_product_sub_category",
     "potential_product_name",
-  ],
-  prospect_logs: [
-    "company_name", "industry", "country", "state", "city", "zone", "route", "source",
-    "next_action", "next_action_date", "feedback", "prospect_status",
-    "contact_email", "contact_phone", "contact_name", "contact_designation",
+    "source", "next_action", "next_action_date", "feedback", "status",
   ],
   rfq_logs: [
     "product_category", "product_sub_category", "product_name", "product_description",
@@ -264,9 +270,8 @@ export async function buildDailyReportData() {
     .eq("is_active", true);
   if (usersErr) throw new Error(`users: ${usersErr.message}`);
 
-  const [leadLogs, prospectLogs, rfqLogs, followupLogs, sampleLogs, quotationLogs] = await Promise.all([
+  const [leadLogs, rfqLogs, followupLogs, sampleLogs, quotationLogs] = await Promise.all([
     fetchAllPaged("lead_logs", { timeCol: "changed_at", since }),
-    fetchAllPaged("prospect_logs", { timeCol: "changed_at", since }),
     fetchAllPaged("rfq_logs", { timeCol: "changed_at", since }),
     fetchAllPaged("rfq_followup_logs", { timeCol: "changed_at", since }),
     fetchAllPaged("sample_logs", { timeCol: "updated_at", since }),
@@ -289,7 +294,6 @@ export async function buildDailyReportData() {
   // User resolution — explicit lookup, no embeds
   const referencedUserIds = [
     ...leadLogs.map((r) => r.changed_by),
-    ...prospectLogs.map((r) => r.changed_by),
     ...rfqLogs.map((r) => r.changed_by),
     ...followupLogs.map((r) => r.changed_by),
     ...sampleLogs.map((r) => r.updated_by),
@@ -299,9 +303,8 @@ export async function buildDailyReportData() {
   activeUsers.forEach((u) => usersMap.set(u.id, u));
 
   // Field-level diffs, computed against each entity's full history
-  const [leadDiffs, prospectDiffs, rfqDiffs, followupDiffs, sampleDiffs, quotationDiffs] = await Promise.all([
+  const [leadDiffs, rfqDiffs, followupDiffs, sampleDiffs, quotationDiffs] = await Promise.all([
     computeChangeInfo({ table: "lead_logs", idCol: "lead_id", timeCol: "changed_at", diffFields: DIFF_FIELDS.lead_logs, hasActionCol: true, todayRows: leadLogs }),
-    computeChangeInfo({ table: "prospect_logs", idCol: "prospect_id", timeCol: "changed_at", diffFields: DIFF_FIELDS.prospect_logs, hasActionCol: true, todayRows: prospectLogs }),
     computeChangeInfo({ table: "rfq_logs", idCol: "rfq_id", timeCol: "changed_at", diffFields: DIFF_FIELDS.rfq_logs, hasActionCol: true, todayRows: rfqLogs }),
     computeChangeInfo({ table: "rfq_followup_logs", idCol: "followup_id", timeCol: "changed_at", diffFields: DIFF_FIELDS.rfq_followup_logs, hasActionCol: true, todayRows: followupLogs }),
     computeChangeInfo({ table: "sample_logs", idCol: "sample_id", timeCol: "updated_at", diffFields: DIFF_FIELDS.sample_logs, hasActionCol: false, todayRows: sampleLogs }),
@@ -331,8 +334,12 @@ export async function buildDailyReportData() {
 
   const entries = [];
 
+  // "Lead" here covers the whole record lifecycle — prospect-stage and
+  // lead-stage alike, since there's only one entity/table now. Reporting
+  // itself doesn't need to distinguish stage at this level (the field
+  // diffs already show whether next_action/source/etc. or contact/product
+  // fields were what changed).
   leadLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "Lead", r.company_name, leadDiffs.get(r.id))));
-  prospectLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "Prospect", r.company_name, prospectDiffs.get(r.id))));
   rfqLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "RFQ", rfqsMap.get(r.rfq_id)?.company_name, rfqDiffs.get(r.id))));
   followupLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "Follow-up", rfqsMap.get(r.rfq_id)?.company_name, followupDiffs.get(r.id))));
   sampleLogs.forEach((r) => {
@@ -390,6 +397,11 @@ async function fetchAllPagedSimple(table, select) {
   return all;
 }
 
+// ── Lifetime Contribution Summary ───────────────────────────────────────
+// Single entity now: every live `leads` row is counted once, split into
+// "Leads (with enquiry)" vs "Prospect-stage (no enquiry yet)" — this
+// replaces the old separate Leads/Prospects columns that used to come
+// from two different tables.
 export async function buildLifetimeSummary() {
   const { data: activeUsers, error: usersErr } = await supabaseAdmin
     .from("users")
@@ -397,7 +409,7 @@ export async function buildLifetimeSummary() {
     .eq("is_active", true);
   if (usersErr) throw new Error(`users: ${usersErr.message}`);
 
-  const counts = new Map(); // userId -> { name, email, Leads, Prospects, ..., total, known }
+  const counts = new Map();
   activeUsers.forEach((u) => {
     counts.set(u.id, { name: userLabel(u) || u.email, email: u.email, total: 0, known: true });
   });
@@ -412,26 +424,23 @@ export async function buildLifetimeSummary() {
     row.total += 1;
   }
 
-  const [leadsRows, prospectsRows, rfqsRows, followupsRows, samplesRows, quotationsRows] = await Promise.all([
-    fetchAllPagedSimple("leads", "id, created_by, deleted_at, prospect_id"),
-    fetchAllPagedSimple("prospects", "id, created_by, deleted_at"),
-    fetchAllPagedSimple("rfqs", "id, created_by, deleted_at"),
+  const [leadsRows, rfqsRows, followupsRows, samplesRows, quotationsRows] = await Promise.all([
+    fetchAllPagedSimple("leads", "id, created_by, deleted_at"),
+    fetchAllPagedSimple("rfqs", "id, created_by, deleted_at, lead_id"),
     fetchAllPagedSimple("rfq_followups", "id, created_by, deleted_at"),
     fetchAllPagedSimple("samples", "id, created_by, deleted_at"),
     fetchAllPagedSimple("quotations", "id, created_by, deleted_at"),
   ]);
 
   const aliveLeads = leadsRows.filter((l) => !l.deleted_at);
+  const aliveRfqs = rfqsRows.filter((r) => !r.deleted_at);
+  const leadIdsWithRfq = new Set(aliveRfqs.map((r) => r.lead_id));
 
-  const convertedProspectIds = new Set(aliveLeads.filter((l) => l.prospect_id).map((l) => l.prospect_id));
+  aliveLeads.forEach((l) => {
+    bump(l.created_by, leadIdsWithRfq.has(l.id) ? "Leads" : "Prospects");
+  });
 
-  aliveLeads.forEach((l) => bump(l.created_by, "Leads"));
-
-  prospectsRows
-    .filter((p) => !p.deleted_at && !convertedProspectIds.has(p.id))
-    .forEach((p) => bump(p.created_by, "Prospects"));
-
-  rfqsRows.filter((r) => !r.deleted_at).forEach((r) => bump(r.created_by, "RFQs"));
+  aliveRfqs.forEach((r) => bump(r.created_by, "RFQs"));
   followupsRows.filter((f) => !f.deleted_at).forEach((f) => bump(f.created_by, "Follow-ups"));
   samplesRows.filter((s) => !s.deleted_at).forEach((s) => bump(s.created_by, "Samples"));
   quotationsRows.filter((q) => !q.deleted_at).forEach((q) => bump(q.created_by, "Quotations"));
@@ -441,7 +450,6 @@ export async function buildLifetimeSummary() {
     .sort((a, b) => b.total - a.total);
   return rows;
 }
-
 
 const LIFETIME_LOG_CAP_PER_EMPLOYEE = 300;
 
@@ -462,7 +470,9 @@ function classifyByFirstInGroup(rows, idCol, timeCol) {
 
 function actionLabel(action) {
   if (!action) return "Updated";
-  return action.charAt(0).toUpperCase() + action.slice(1);
+  const base = action.replace(/^migrated_/, "");
+  const label = base.charAt(0).toUpperCase() + base.slice(1);
+  return action.startsWith("migrated_") ? `Migrated (${label})` : label;
 }
 
 export async function buildLifetimeActivityLog() {
@@ -472,9 +482,8 @@ export async function buildLifetimeActivityLog() {
     .eq("is_active", true);
   if (usersErr) throw new Error(`users: ${usersErr.message}`);
 
-  const [leadLogs, prospectLogs, rfqLogs, followupLogs, sampleLogs, quotationLogs] = await Promise.all([
+  const [leadLogs, rfqLogs, followupLogs, sampleLogs, quotationLogs] = await Promise.all([
     fetchAllPaged("lead_logs",         { select: "id, lead_id, action, changed_by, changed_at, company_name", timeCol: "changed_at" }),
-    fetchAllPaged("prospect_logs",     { select: "id, prospect_id, action, changed_by, changed_at, company_name", timeCol: "changed_at" }),
     fetchAllPaged("rfq_logs",          { select: "id, rfq_id, action, changed_by, changed_at", timeCol: "changed_at" }),
     fetchAllPaged("rfq_followup_logs", { select: "id, followup_id, rfq_id, action, changed_by, changed_at", timeCol: "changed_at" }),
     fetchAllPaged("sample_logs",       { select: "id, sample_id, updated_by, updated_at", timeCol: "updated_at" }),
@@ -495,7 +504,6 @@ export async function buildLifetimeActivityLog() {
 
   const referencedUserIds = [
     ...leadLogs.map((r) => r.changed_by),
-    ...prospectLogs.map((r) => r.changed_by),
     ...rfqLogs.map((r) => r.changed_by),
     ...followupLogs.map((r) => r.changed_by),
     ...sampleLogs.map((r) => r.updated_by),
@@ -512,7 +520,7 @@ export async function buildLifetimeActivityLog() {
       userId: userId || null,
       timestamp,
       dateLabel: fmtDateShort(timestamp),
-      timeLabel: fmtTime(timestamp).split(", ").pop() || fmtTime(timestamp), // just the time portion
+      timeLabel: fmtTime(timestamp).split(", ").pop() || fmtTime(timestamp),
       type,
       changeType,
       company: company || "Unknown company",
@@ -521,7 +529,6 @@ export async function buildLifetimeActivityLog() {
 
   const entries = [];
   leadLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "Lead", r.company_name, actionLabel(r.action))));
-  prospectLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "Prospect", r.company_name, actionLabel(r.action))));
   rfqLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "RFQ", rfqsMap.get(r.rfq_id)?.company_name, actionLabel(r.action))));
   followupLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "Follow-up", rfqsMap.get(r.rfq_id)?.company_name, actionLabel(r.action))));
   sampleLogs.forEach((r) => {
@@ -538,7 +545,7 @@ export async function buildLifetimeActivityLog() {
     buckets.set(u.id, { userId: u.id, name: userLabel(u) || u.email, email: u.email, entries: [] });
   });
   entries.forEach((e) => {
-    if (!e.userId || !buckets.has(e.userId)) return; // skip unattributed / inactive users
+    if (!e.userId || !buckets.has(e.userId)) return;
     buckets.get(e.userId).entries.push(e);
   });
 
@@ -564,11 +571,19 @@ function timeOnly(iso) {
   return full.split(", ").pop() || full;
 }
 
+// ── Status report ────────────────────────────────────────────────────
+// "Lead Stage Log" replaces the old "Prospect Status Log" — it's sourced
+// from lead_logs' own next_action/next_action_date/feedback/status
+// columns (added via migration) instead of the retired prospects table.
+// Only lead_logs rows where a stage field actually changed are included,
+// so this stays focused on follow-up/status activity rather than
+// duplicating every contact-info edit already visible in the main
+// activity log.
 export async function buildStatusReport() {
-  const [prospectLogRows, followupRows, sampleLogRows, quotationLogRows] = await Promise.all([
+  const [leadStageRows, followupRows, sampleLogRows, quotationLogRows] = await Promise.all([
     fetchAllPagedSelect(
-      "prospect_logs",
-      "id, prospect_id, action, changed_by, changed_at, company_name, prospect_status, next_action, next_action_date, feedback",
+      "lead_logs",
+      "id, lead_id, action, changed_by, changed_at, company_name, status, next_action, next_action_date, feedback",
       "changed_at"
     ),
     fetchAllPagedSelect(
@@ -588,6 +603,13 @@ export async function buildStatusReport() {
     ),
   ]);
 
+  // Only rows that actually carry a stage signal — a next_action, a
+  // scheduled date, or feedback/remark — count as "stage activity". A
+  // lead_logs row that's purely a contact-info/product edit (no stage
+  // fields touched) is already covered by the main Today's/Lifetime logs.
+  const liveLeadStageRows = leadStageRows.filter(
+    (r) => r.next_action || r.next_action_date || r.feedback || r.status
+  );
   const liveFollowupRows = followupRows.filter((r) => !r.deleted_at);
 
   // Company-name resolution
@@ -604,7 +626,7 @@ export async function buildStatusReport() {
 
   // User resolution
   const referencedUserIds = [
-    ...prospectLogRows.map((r) => r.changed_by),
+    ...liveLeadStageRows.map((r) => r.changed_by),
     ...liveFollowupRows.map((r) => r.created_by),
     ...sampleLogRows.map((r) => r.updated_by),
     ...quotationLogRows.map((r) => r.updated_by),
@@ -615,11 +637,11 @@ export async function buildStatusReport() {
     return userLabel(usersMap.get(id)) || `Unknown (${id.slice(0, 8)})`;
   }
 
-// ── Prospect Status Log ────────────────────────────────────────────
-  const prospectStatusLog = prospectLogRows
+  // ── Lead Stage Log (was: Prospect Status Log) ───────────────────────
+  const leadStageLog = liveLeadStageRows
     .map((r) => {
       const { time, text: remark } = extractEmbeddedTime(r.feedback);
-      const status = r.prospect_status || "—";
+      const status = r.status || "—";
       return {
         timestamp: r.changed_at,
         dateLabel: fmtDateShort(r.changed_at),
@@ -709,8 +731,7 @@ export async function buildStatusReport() {
     })
     .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
-  // ── Current status snapshot — built from LIVE tables for accuracy,
-  //    now including who created/last-updated the enquiry itself ───────
+  // ── Current status snapshot — built from LIVE tables for accuracy ───
   const [rfqsLive, samplesLive, quotationsLive, followupsLive] = await Promise.all([
     fetchAllPagedSimple("rfqs", "id, company_name, sample_required, quotation_required, created_by, updated_by, deleted_at"),
     fetchAllPagedSimple("samples", "id, rfq_id, sample_status, deleted_at"),
@@ -755,11 +776,6 @@ export async function buildStatusReport() {
     })
     .sort((a, b) => a.company.localeCompare(b.company));
 
-  // Groups entries three levels deep: user → status → nearest due date.
-  // "Due date" is whatever field each log type uses for "next action
-  // needed" (next_action_date / followup_date / follow_up_date). Entries
-  // with no due date sink to the bottom of their status group; status
-  // groups with no due-dated entries at all sink to the bottom too.
   function sortByNearestDue(entries) {
     return [...entries].sort((a, b) => {
       if (a.dueDateRaw && b.dueDateRaw) {
@@ -815,7 +831,7 @@ export async function buildStatusReport() {
   }
 
   return {
-    prospectStatusLog: groupByUpdaterWithStatus(prospectStatusLog),
+    leadStageLog: groupByUpdaterWithStatus(leadStageLog),
     enquiryStatusLog: groupByUpdaterWithStatus(enquiryStatusLog),
     sampleStatusLog: groupByUpdaterWithStatus(sampleStatusLog),
     quotationStatusLog: groupByUpdaterWithStatus(quotationStatusLog),
@@ -918,7 +934,6 @@ export async function buildBillsReport() {
     .eq("is_active", true);
   if (usersErr) throw new Error(`users: ${usersErr.message}`);
 
-  // ── Live bills — totals + outstanding snapshot ───────────────────────
   const liveBills = await fetchAllPagedSimple(
     "bills",
     "id, party_name, bill_no, bill_date, bill_amount, balance_amount, status, location, " +
@@ -956,7 +971,6 @@ export async function buildBillsReport() {
     }))
     .sort((a, b) => b.daysOutstanding - a.daysOutstanding);
 
-  // ── Lifetime per-employee bill summary ────────────────────────────────
   const lifetimeCounts = new Map();
   activeUsers.forEach((u) => {
     lifetimeCounts.set(u.id, { name: userLabel(u) || u.email, email: u.email, billsAdded: 0, totalCollected: 0, known: true });
@@ -990,12 +1004,8 @@ export async function buildBillsReport() {
     .filter((r) => r.billsAdded > 0 || r.totalCollected > 0)
     .sort((a, b) => b.totalCollected - a.totalCollected);
 
-  // ── Today's bill activity ─────────────────────────────────────────────
   const todayLogs = await fetchAllPaged("bill_logs", { timeCol: "changed_at", since });
   const billIds = [...new Set(todayLogs.map((l) => l.bill_id).filter(Boolean))];
-  // Expanded select — needed so "created"/"uploaded" entries can show
-  // every field the bill was created with (see billCreateChanges above),
-  // not just party_name/bill_no.
   const billsMap = await fetchByIds(
     "bills",
     "id, party_name, bill_no, bill_date, bill_amount, balance_amount, location, mobile_1, mobile_2",
@@ -1043,10 +1053,6 @@ export async function buildBillsReport() {
       }));
       billEntries.push(makeBillEntry(log.changed_by, log.changed_at, log.action, party, [], changes));
     } else if (log.action === "created" || log.action === "uploaded") {
-      // Show every field the bill was created with, as green "added"
-      // lines — same visual treatment as an edit's diff, just all "to"
-      // with no "from". Falls back to the old single-line remark only in
-      // the unexpected case the bill itself can no longer be found.
       const changes = bill
         ? billCreateChanges(bill)
         : [{ label: "Note", to: log.remark || "New bill added" }];

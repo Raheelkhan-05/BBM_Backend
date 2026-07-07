@@ -67,18 +67,18 @@ const COLORS = {
 
 const TYPE_COLORS = {
   Lead: "#4338ca",
-  Prospect: "#6366f1",
   RFQ: "#6d28d9",
   "Follow-up": "#0f766e",
   Sample: "#be123c",
   Quotation: "#15803d",
 };
 
+
 const CHANGE_COLORS = {
   Created: "#15803d",
   Updated: "#2563eb",
   Deleted: "#be123c",
-  // Payment (Bill Dues) action types
+  Migrated: "#9333ea",
   Payment: "#0d9488",
   Edited: "#2563eb",
 };
@@ -333,9 +333,9 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
 
     if (statusReport) {
       y += 6;
-      tocSectionTitle("Prospect Status Log", destName("section", "prospect_root"));
-      statusReport.prospectStatusLog.forEach((g) => {
-        linkLine(`${g.name}  (${g.entries.length} update(s))`, destName("prospect", g.name), { indent: 16, size: 9 });
+      tocSectionTitle("Lead Stage Log", destName("section", "leadstage_root"));   // was "Prospect Status Log" / "prospect_root"
+      statusReport.leadStageLog.forEach((g) => {                                  // was statusReport.prospectStatusLog
+        linkLine(`${g.name}  (${g.entries.length} update(s))`, destName("leadstage", g.name), { indent: 16, size: 9 });  // was destName("prospect", g.name)
       });
 
       y += 6;
@@ -672,10 +672,10 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
     // ══════════════════════════════════════════════════════════════
     if (statusReport) {
       const STATUS_SECTION_COLORS = {
-        Prospect: TYPE_COLORS.Prospect,
+        LeadStage: "#4338ca",   // same indigo as the Lead type badge
         Enquiry: TYPE_COLORS.RFQ,
-        Sample: TYPE_COLORS.Sample,
-        Quotation: TYPE_COLORS.Quotation,
+        Sample: "#be123c",
+        Quotation: "#15803d",
       };
 
       // FIX: bullet-line width now matches exactly between the height
@@ -765,17 +765,22 @@ export function buildDailyReportPdf(reportData, lifetimeSummary, lifetimeActivit
         });
       }
 
-      renderGroupedStatusLog("Prospect Status Log", "prospect_root", statusReport.prospectStatusLog, STATUS_SECTION_COLORS.Prospect, "PROSPECT", (entry) => {
-        const lines = [`Status: ${entry.status}`];
-        if (entry.nextAction) lines.push(`Next Action: ${entry.nextAction}`);
-        if (entry.nextActionDate) {
-          lines.push(`Next Action Date: ${entry.nextActionDate}${entry.nextActionTime ? ` at ${entry.nextActionTime}` : ""}`);
-        } else if (entry.nextActionTime) {
-          lines.push(`Next Action Time: ${entry.nextActionTime}`);
-        }
-        if (entry.remark) lines.push(`Remark: ${entry.remark}`);
-        return lines;
-      }, "prospect");
+      renderGroupedStatusLog(
+        "Lead Stage Log", "leadstage_root", statusReport.leadStageLog,
+        STATUS_SECTION_COLORS.LeadStage, "LEAD STAGE",
+        (entry) => {
+          const lines = [`Status: ${entry.status}`];
+          if (entry.nextAction) lines.push(`Next Action: ${entry.nextAction}`);
+          if (entry.nextActionDate) {
+            lines.push(`Next Action Date: ${entry.nextActionDate}${entry.nextActionTime ? ` at ${entry.nextActionTime}` : ""}`);
+          } else if (entry.nextActionTime) {
+            lines.push(`Next Action Time: ${entry.nextActionTime}`);
+          }
+          if (entry.remark) lines.push(`Remark: ${entry.remark}`);
+          return lines;
+        },
+        "leadstage"
+      );
 
       renderGroupedStatusLog("Enquiry Status Log", "enquiry_root", statusReport.enquiryStatusLog, STATUS_SECTION_COLORS.Enquiry, "ENQUIRY", (entry) => {
         const lines = [`Status: ${entry.status}`];

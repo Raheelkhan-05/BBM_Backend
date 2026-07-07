@@ -37,6 +37,13 @@ function leadSnapshot(fields) {
     potential_product_category:     fields.potential_product_category     ?? null,
     potential_product_sub_category: fields.potential_product_sub_category ?? null,
     potential_product_name:         fields.potential_product_name         ?? null,
+    // NEW — prospect-stage fields, now on leads itself; previously dropped
+    // entirely from the audit trail.
+    source:            fields.source            ?? null,
+    next_action:        fields.next_action        ?? null,
+    next_action_date:   fields.next_action_date   ?? null,
+    feedback:           fields.feedback           ?? null,
+    status:             fields.status             ?? null,
   };
 }
 
