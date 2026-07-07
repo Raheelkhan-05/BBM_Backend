@@ -1098,3 +1098,272 @@ export async function buildBillsReport() {
     outstandingSnapshot,
   };
 }
+
+// ── Company Timeline — full history for one lead, chronological ────────
+// Walks lead → its rfqs → each rfq's followups/samples/quotations → order
+// (if converted), merging every log source into one flat, time-sorted
+// feed. This is the "prospect → lead → enquiry → order" view.
+export async function buildCompanyTimeline(leadId) {
+  const { data: lead, error: leadErr } = await supabaseAdmin
+    .from("leads")
+    .select("*, creator:users!leads_created_by_fkey(id, email, first_name, last_name), updater:users!leads_updated_by_fkey(id, email, first_name, last_name)")
+    .eq("id", leadId)
+    .single();
+  if (leadErr || !lead) throw new Error("Lead not found");
+
+  const [leadLogs, rfqs] = await Promise.all([
+    supabaseAdmin.from("lead_logs").select("*").eq("lead_id", leadId).order("changed_at", { ascending: true }).then(r => r.data || []),
+    supabaseAdmin.from("rfqs").select("*").eq("lead_id", leadId).order("created_at", { ascending: true }).then(r => r.data || []),
+  ]);
+
+  const rfqIds = rfqs.map((r) => r.id);
+
+  const [rfqLogs, followups, followupLogs, samples, sampleLogs, quotations, quotationLogs, orders] = await Promise.all([
+    rfqIds.length ? supabaseAdmin.from("rfq_logs").select("*").in("rfq_id", rfqIds).order("changed_at", { ascending: true }).then(r => r.data || []) : [],
+    rfqIds.length ? supabaseAdmin.from("rfq_followups").select("*").in("rfq_id", rfqIds).order("created_at", { ascending: true }).then(r => r.data || []) : [],
+    rfqIds.length ? supabaseAdmin.from("rfq_followup_logs").select("*").in("rfq_id", rfqIds).order("changed_at", { ascending: true }).then(r => r.data || []) : [],
+    rfqIds.length ? supabaseAdmin.from("samples").select("*").in("rfq_id", rfqIds).then(r => r.data || []) : [],
+    rfqIds.length ? supabaseAdmin.from("samples").select("id").in("rfq_id", rfqIds).then(async (r) => {
+      const sIds = (r.data || []).map((s) => s.id);
+      if (!sIds.length) return [];
+      const { data } = await supabaseAdmin.from("sample_logs").select("*").in("sample_id", sIds).order("updated_at", { ascending: true });
+      return data || [];
+    }) : [],
+    rfqIds.length ? supabaseAdmin.from("quotations").select("*").in("rfq_id", rfqIds).then(r => r.data || []) : [],
+    rfqIds.length ? supabaseAdmin.from("quotations").select("id").in("rfq_id", rfqIds).then(async (r) => {
+      const qIds = (r.data || []).map((q) => q.id);
+      if (!qIds.length) return [];
+      const { data } = await supabaseAdmin.from("quotation_logs").select("*").in("quotation_id", qIds).order("updated_at", { ascending: true });
+      return data || [];
+    }) : [],
+    supabaseAdmin.from("orders").select("*").eq("lead_id", leadId).then(r => r.data || []),
+  ]);
+
+  const referencedUserIds = [
+    ...leadLogs.map((r) => r.changed_by),
+    ...rfqLogs.map((r) => r.changed_by),
+    ...followupLogs.map((r) => r.changed_by),
+    ...sampleLogs.map((r) => r.updated_by),
+    ...quotationLogs.map((r) => r.updated_by),
+    ...orders.map((r) => r.converted_by),
+  ];
+  const usersMap = await fetchByIds("users", "id, email, first_name, last_name", referencedUserIds);
+  function who(id) {
+    if (!id) return "Unattributed";
+    return userLabel(usersMap.get(id)) || `Unknown (${id.slice(0, 8)})`;
+  }
+
+  const rfqById = new Map(rfqs.map((r) => [r.id, r]));
+  const sampleById = new Map(samples.map((s) => [s.id, s]));
+  const quotationById = new Map(quotations.map((q) => [q.id, q]));
+
+  const timeline = [];
+
+  leadLogs.forEach((r) => {
+    const { time, text: remark } = extractEmbeddedTime(r.feedback);
+    timeline.push({
+      timestamp: r.changed_at,
+      source: "Lead",
+      action: actionLabelForTimeline(r.action),
+      by: who(r.changed_by),
+      summary: r.status ? `Status: ${r.status}` : (r.next_action ? `Next action: ${r.next_action}` : "Details updated"),
+      detail: remark,
+    });
+  });
+
+  rfqLogs.forEach((r) => {
+    const rfq = rfqById.get(r.rfq_id);
+    timeline.push({
+      timestamp: r.changed_at,
+      source: "Enquiry",
+      action: actionLabelForTimeline(r.action),
+      by: who(r.changed_by),
+      summary: `${rfq?.product_name || rfq?.product_category || "Enquiry"}`,
+      detail: r.product_description || null,
+    });
+  });
+
+  followupLogs.forEach((r) => {
+    timeline.push({
+      timestamp: r.changed_at,
+      source: "Follow-up",
+      action: actionLabelForTimeline(r.action),
+      by: who(r.changed_by),
+      summary: r.enquiry_status ? `Status: ${r.enquiry_status}` : (r.next_action || "Follow-up logged"),
+      detail: r.remark || null,
+    });
+  });
+
+  sampleLogs.forEach((r) => {
+    timeline.push({
+      timestamp: r.updated_at,
+      source: "Sample",
+      action: "Updated",
+      by: who(r.updated_by),
+      summary: `Status: ${r.sample_status || "—"}${r.result ? ` (${r.result})` : ""}`,
+      detail: r.notes || null,
+    });
+  });
+
+  quotationLogs.forEach((r) => {
+    timeline.push({
+      timestamp: r.updated_at,
+      source: "Quotation",
+      action: "Updated",
+      by: who(r.updated_by),
+      summary: `Status: ${r.quotation_status || "—"}${r.result ? ` (${r.result})` : ""}`,
+      detail: r.notes || null,
+    });
+  });
+
+  orders.forEach((o) => {
+    timeline.push({
+      timestamp: o.converted_at,
+      source: "Order",
+      action: o.deleted_at ? "Reverted" : "Converted",
+      by: who(o.converted_by),
+      summary: o.deleted_at ? "Order reverted" : "Converted to order",
+      detail: null,
+    });
+  });
+
+  timeline.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+  return {
+    lead,
+    stage: rfqs.length > 0 ? "Lead" : "Prospect",
+    rfqs: rfqs.map((r) => ({
+      ...r,
+      hasOrder: orders.some((o) => o.rfq_id === r.id && !o.deleted_at),
+    })),
+    timeline,
+  };
+}
+
+function actionLabelForTimeline(action) {
+  if (!action) return "Updated";
+  const base = action.replace(/^migrated_/, "");
+  const label = base.charAt(0).toUpperCase() + base.slice(1);
+  return action.startsWith("migrated_") ? `Migrated (${label})` : label;
+}
+
+// ── Company search — for the admin page's lead picker ────────────────────
+export async function searchCompanies(query) {
+  let q = supabaseAdmin
+    .from("leads")
+    .select("id, company_name, city, state, status, created_at")
+    .is("deleted_at", null)
+    .order("company_name", { ascending: true })
+    .limit(30);
+  if (query) q = q.ilike("company_name", `%${query}%`);
+  const { data, error } = await q;
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+// ── Live Activity Feed — every log, every employee, all-time, newest
+// first. Unlike buildDailyReportData (bounded to today) or
+// buildLifetimeActivityLog (grouped per-employee, capped), this is one
+// flat, paginated, cross-employee feed — the "everything that just
+// happened" view.
+export async function buildActivityFeed({ limit = 30, offset = 0, employeeId = null } = {}) {
+  const [leadLogs, rfqLogs, followupLogs, sampleLogs, quotationLogs] = await Promise.all([
+    fetchAllPaged("lead_logs", { timeCol: "changed_at" }),
+    fetchAllPaged("rfq_logs", { timeCol: "changed_at" }),
+    fetchAllPaged("rfq_followup_logs", { timeCol: "changed_at" }),
+    fetchAllPaged("sample_logs", { timeCol: "updated_at" }),
+    fetchAllPaged("quotation_logs", { timeCol: "updated_at" }),
+  ]);
+
+  const sampleIds = sampleLogs.map((r) => r.sample_id);
+  const quotationIds = quotationLogs.map((r) => r.quotation_id);
+  const samplesMap = await fetchByIds("samples", "id, rfq_id", sampleIds);
+  const quotationsMap = await fetchByIds("quotations", "id, rfq_id", quotationIds);
+  const rfqIdsNeeded = [
+    ...rfqLogs.map((r) => r.rfq_id),
+    ...followupLogs.map((r) => r.rfq_id),
+    ...[...samplesMap.values()].map((s) => s.rfq_id),
+    ...[...quotationsMap.values()].map((q) => q.rfq_id),
+  ];
+  const rfqsMap = await fetchByIds("rfqs", "id, company_name", rfqIdsNeeded);
+
+  const referencedUserIds = [
+    ...leadLogs.map((r) => r.changed_by),
+    ...rfqLogs.map((r) => r.changed_by),
+    ...followupLogs.map((r) => r.changed_by),
+    ...sampleLogs.map((r) => r.updated_by),
+    ...quotationLogs.map((r) => r.updated_by),
+  ];
+  const usersMap = await fetchByIds("users", "id, email, first_name, last_name", referencedUserIds);
+
+  const [leadDiffs, rfqDiffs, followupDiffs, sampleDiffs, quotationDiffs] = await Promise.all([
+    computeChangeInfo({ table: "lead_logs", idCol: "lead_id", timeCol: "changed_at", diffFields: DIFF_FIELDS.lead_logs, hasActionCol: true, todayRows: leadLogs }),
+    computeChangeInfo({ table: "rfq_logs", idCol: "rfq_id", timeCol: "changed_at", diffFields: DIFF_FIELDS.rfq_logs, hasActionCol: true, todayRows: rfqLogs }),
+    computeChangeInfo({ table: "rfq_followup_logs", idCol: "followup_id", timeCol: "changed_at", diffFields: DIFF_FIELDS.rfq_followup_logs, hasActionCol: true, todayRows: followupLogs }),
+    computeChangeInfo({ table: "sample_logs", idCol: "sample_id", timeCol: "updated_at", diffFields: DIFF_FIELDS.sample_logs, hasActionCol: false, todayRows: sampleLogs }),
+    computeChangeInfo({ table: "quotation_logs", idCol: "quotation_id", timeCol: "updated_at", diffFields: DIFF_FIELDS.quotation_logs, hasActionCol: false, todayRows: quotationLogs }),
+  ]);
+
+  function makeEntry(userId, timestamp, type, company, changeInfo) {
+    const u = usersMap.get(userId);
+    const changeType = changeInfo?.changeType || "Updated";
+    const changes = (changeInfo?.changes || []).map((c) => ({
+      label: fieldLabel(c.field),
+      from: c.from !== undefined ? fmtVal(c.from) : null,
+      to: c.to !== undefined ? fmtVal(c.to) : null,
+    }));
+    return {
+      userId: userId || null,
+      email: u?.email || null,
+      name: userLabel(u) || (userId ? `Unknown (${userId.slice(0, 8)})` : "Unattributed"),
+      timestamp,
+      type,
+      company: company || "Unknown company",
+      changeType,
+      changes,
+    };
+  }
+
+  let entries = [];
+  leadLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "Lead", r.company_name, leadDiffs.get(r.id))));
+  rfqLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "RFQ", rfqsMap.get(r.rfq_id)?.company_name, rfqDiffs.get(r.id))));
+  followupLogs.forEach((r) => entries.push(makeEntry(r.changed_by, r.changed_at, "Follow-up", rfqsMap.get(r.rfq_id)?.company_name, followupDiffs.get(r.id))));
+  sampleLogs.forEach((r) => {
+    const rfqId = samplesMap.get(r.sample_id)?.rfq_id;
+    entries.push(makeEntry(r.updated_by, r.updated_at, "Sample", rfqsMap.get(rfqId)?.company_name, sampleDiffs.get(r.id)));
+  });
+  quotationLogs.forEach((r) => {
+    const rfqId = quotationsMap.get(r.quotation_id)?.rfq_id;
+    entries.push(makeEntry(r.updated_by, r.updated_at, "Quotation", rfqsMap.get(rfqId)?.company_name, quotationDiffs.get(r.id)));
+  });
+
+  if (employeeId) entries = entries.filter((e) => e.userId === employeeId);
+  entries.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  const page = entries.slice(offset, offset + limit);
+  return { entries: page, total: entries.length, hasMore: offset + limit < entries.length };
+}
+
+// ── All-time, per-employee, WITH full diffs (like buildDailyReportData
+// but unbounded) — powers the "By Employee" tab, full history not
+// capped/condensed the way buildLifetimeActivityLog is.
+export async function buildAllTimeByEmployee() {
+  const { data: activeUsers, error: usersErr } = await supabaseAdmin
+    .from("users").select("id, email, first_name, last_name").eq("is_active", true);
+  if (usersErr) throw new Error(`users: ${usersErr.message}`);
+
+  const { entries } = await buildActivityFeed({ limit: 1_000_000, offset: 0 });
+
+  const buckets = new Map();
+  activeUsers.forEach((u) => {
+    buckets.set(u.id, { userId: u.id, name: userLabel(u) || u.email, email: u.email, entries: [] });
+  });
+  entries.forEach((e) => {
+    if (!e.userId || !buckets.has(e.userId)) return;
+    buckets.get(e.userId).entries.push(e);
+  });
+
+  return Array.from(buckets.values())
+    .filter((emp) => emp.entries.length > 0)
+    .sort((a, b) => new Date(b.entries[0].timestamp) - new Date(a.entries[0].timestamp));
+}

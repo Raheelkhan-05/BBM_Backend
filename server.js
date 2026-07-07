@@ -18,6 +18,7 @@ import cronRoutes from "./src/routes/cron.routes.js";
 import billsRoutes from "./src/routes/bills.routes.js";
 import liveReportRoutes from "./src/routes/liveReport.routes.js";
 import ordersRouter from "./src/routes/orders.routes.js";
+import adminActivityRoutes from "./src/routes/adminActivity.routes.js";
 
 dotenv.config();
 
@@ -42,6 +43,7 @@ app.use("/api/cron", cronRoutes);
 app.use("/api/bills", billsRoutes);
 app.use("/api/reports", liveReportRoutes);
 app.use("/api/orders", ordersRouter);
+app.use("/api/admin/activity", adminActivityRoutes);
 app.get("/api/me", auth, (req, res) => {
   res.json({
     id: req.user.id,
