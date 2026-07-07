@@ -357,16 +357,40 @@ export const updateRFQToggles = async (req, res) => {
 
     const result = { sample: null, quotation: null, sampleRemoved: false, quotationRemoved: false };
 
+    // When Sample/Quotation is newly turned ON here (as opposed to at
+    // enquiry-creation time, where the form's own follow-up date/time gets
+    // passed straight through), there's no date on hand from the request —
+    // seed it from the enquiry's latest follow-up instead, so a
+    // newly-added Sample/Quotation isn't left with no date at all.
+    let seedDate = null, seedTime = null;
+    if ((sample_required && !existing.sample_required) || (quotation_required && !existing.quotation_required)) {
+      const { data: latestFollowup } = await supabaseAdmin
+        .from("rfq_followups")
+        .select("followup_date, notes")
+        .eq("rfq_id", id)
+        .is("deleted_at", null)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      seedDate = latestFollowup?.followup_date || null;
+      const timeMatch = /^\[Time:\s*(\d{2}:\d{2})\]/.exec(latestFollowup?.notes || "");
+      seedTime = timeMatch ? timeMatch[1] : null;
+    }
+
     // Sample: OFF → ON
     if (sample_required && !existing.sample_required) {
       const { data: s, error: sErr } = await supabaseAdmin
         .from("samples")
-        .insert([{ rfq_id: id, sample_required: true, sample_status: null, created_by: userId, updated_by: userId }])
+        .insert([{
+          rfq_id: id, sample_required: true, sample_status: null,
+          follow_up_date: seedDate, follow_up_time: seedTime,
+          created_by: userId, updated_by: userId,
+        }])
         .select(SAMPLE_WITH_CREATOR_UPDATER)
         .single();
       if (sErr) console.error("updateRFQToggles: FAILED to create sample row for rfq", id, "-", sErr.message);
       else if (s) {
-        logSample(s.id, "created", userId, { sample_status: null, follow_up_date: null });
+        logSample(s.id, "created", userId, { sample_status: null, follow_up_date: seedDate, follow_up_time: seedTime });
         result.sample = s;
       }
     }
@@ -388,12 +412,16 @@ export const updateRFQToggles = async (req, res) => {
     if (quotation_required && !existing.quotation_required) {
       const { data: q, error: qErr } = await supabaseAdmin
         .from("quotations")
-        .insert([{ rfq_id: id, quotation_required: true, quotation_status: null, created_by: userId, updated_by: userId }])
+        .insert([{
+          rfq_id: id, quotation_required: true, quotation_status: null,
+          follow_up_date: seedDate, follow_up_time: seedTime,
+          created_by: userId, updated_by: userId,
+        }])
         .select(QUOTATION_WITH_CREATOR_UPDATER)
         .single();
       if (qErr) console.error("updateRFQToggles: FAILED to create quotation row for rfq", id, "-", qErr.message);
       else if (q) {
-        logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: null });
+        logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: seedDate, follow_up_time: seedTime });
         result.quotation = q;
       }
     }
