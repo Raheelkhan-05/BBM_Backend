@@ -236,3 +236,18 @@ export const deleteLead = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+
+export const getLeadLogs = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabaseAdmin
+      .from("lead_logs")
+      .select("*, changer:users!lead_logs_changed_by_fkey(id, email, first_name, last_name)")
+      .eq("lead_id", id)
+      .order("changed_at", { ascending: true }); // ascending — diffed oldest→newest below
+    if (error) return res.status(400).json({ success: false, message: error.message });
+    return res.json({ success: true, logs: data || [] });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
