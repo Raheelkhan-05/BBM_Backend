@@ -57,30 +57,38 @@ function logLead(leadId, action, changedBy, snapshot = {}) {
 
 function extractLeadFields(body) {
   const {
-    prospect_id, company_name, country, state, city, zone, route,
+    company_name, country, state, city, zone, route,
     primary_contact_name, primary_designation, primary_phone, primary_email,
     secondary_contact_name, secondary_designation, secondary_phone, secondary_email,
     nature_of_business, manufacturing_industry, company_website, gst_number, linkedin_profile,
     potential_product_category, potential_product_sub_category, potential_product_name,
+    source, next_action, next_action_date, feedback, status,
   } = body;
   return {
-    prospect_id: prospect_id || null,
     company_name,
     country: country || "India",
-    state, city, zone, route,
-    primary_contact_name, primary_designation, primary_phone, primary_email,
+    state: state || null, city: city || null, zone: zone || null, route: route || null,
+    primary_contact_name: primary_contact_name || null,
+    primary_designation:  primary_designation  || null,
+    primary_phone:        primary_phone        || null,
+    primary_email:        primary_email        || null,
     secondary_contact_name: secondary_contact_name || null,
     secondary_designation:  secondary_designation  || null,
     secondary_phone:        secondary_phone        || null,
     secondary_email:        secondary_email        || null,
-    nature_of_business,
-    manufacturing_industry: nature_of_business === "Manufacturer" ? manufacturing_industry : null,
-    company_website,
-    gst_number:        gst_number        || null,
-    linkedin_profile:  linkedin_profile  || null,
+    nature_of_business:      nature_of_business      || null,
+    manufacturing_industry:  nature_of_business === "Manufacturer" ? (manufacturing_industry || null) : null,
+    company_website:  company_website  || null,
+    gst_number:       gst_number       || null,
+    linkedin_profile: linkedin_profile || null,
     potential_product_category:     potential_product_category     || null,
     potential_product_sub_category: potential_product_sub_category || null,
     potential_product_name:         potential_product_name         || null,
+    source:            source            || null,
+    next_action:        next_action        || null,
+    next_action_date:   next_action_date   || null,
+    feedback:           feedback           || null,
+    status:             status             || "Active",
   };
 }
 
