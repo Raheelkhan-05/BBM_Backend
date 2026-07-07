@@ -202,6 +202,12 @@ export const deleteLead = async (req, res) => {
         supabaseAdmin.from("samples").update({ deleted_at: now }).in("rfq_id", rfqIds).is("deleted_at", null),
         supabaseAdmin.from("quotations").update({ deleted_at: now }).in("rfq_id", rfqIds).is("deleted_at", null),
         supabaseAdmin.from("rfq_followups").update({ deleted_at: now }).in("rfq_id", rfqIds).is("deleted_at", null),
+        // Deleting a lead takes its enquiries with it — and any order that
+        // came out of one of those enquiries needs to stop showing under
+        // the Orders tab too. Soft-delete keeps the audit history intact;
+        // the DB-level ON DELETE CASCADE (orders_cascade_fix.sql) only
+        // kicks in for a hard purge, not this soft delete.
+        supabaseAdmin.from("orders").update({ deleted_at: now }).in("rfq_id", rfqIds).is("deleted_at", null),
         supabaseAdmin.from("rfqs").update({ deleted_at: now }).in("id", rfqIds).is("deleted_at", null),
       ]);
     }

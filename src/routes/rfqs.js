@@ -3,7 +3,7 @@ import authenticate from "../middleware/auth.js";
 import {
   getRFQs, getLeadsForRFQ, createRFQ, updateRFQ, deleteRFQ,
   getFollowups, createFollowup, updateFollowup, deleteFollowup,
-  getDueFollowups, resolveFollowup
+  getDueFollowups, resolveFollowup, updateRFQToggles 
 } from "../controllers/rfq.controller.js";
 import roleGuard from "../middleware/roleGuard.js";
 
@@ -16,6 +16,8 @@ router.get("/leads", getLeadsForRFQ);
 router.post("/", createRFQ);
 router.put("/:id", updateRFQ);
 router.delete("/:id", deleteRFQ);
+router.patch("/:id/toggles", updateRFQToggles);
+
 
 // Follow-ups
 router.get("/:rfqId/followups", getFollowups);

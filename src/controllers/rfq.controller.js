@@ -13,6 +13,15 @@
 // sync with fixes like updated_by tracking. Removed here; make sure your
 // routes file imports updateSample from samples.controller.js and
 // updateQuotation from quotations.controller.js.
+//
+// FIXED: createRFQ/updateRFQ used to fire-and-forget the samples/quotations
+// insert with `.then(({ data: s }) => { if (s) logSample(...) })` — if the
+// insert itself failed (RLS, trigger, whatever), `error` was never even
+// looked at. The RFQ would end up with sample_required/quotation_required
+// = true but NO row in samples/quotations at all, which surfaces in the UI
+// as "No record found" with nothing to fix it. Both paths below now await
+// the insert and log a loud error if it fails, and a new ensureSampleQuotation
+// endpoint self-heals any enquiry that's already stuck in that state.
 
 import { sendMail } from "../config/mailer.js";
 import { rfqCreatedSalesperson, rfqCreatedCoordinator } from "../config/emailTemplates.js";
@@ -102,6 +111,14 @@ const RFQ_WITH_CREATOR_UPDATER = `
     updater:users!quotations_updated_by_fkey_main(id, email, first_name, last_name))
 `;
 
+const SAMPLE_WITH_CREATOR_UPDATER =
+  "*, creator:users!samples_created_by_fkey(id, email, first_name, last_name), " +
+  "updater:users!samples_updated_by_fkey_main(id, email, first_name, last_name)";
+
+const QUOTATION_WITH_CREATOR_UPDATER =
+  "*, creator:users!quotations_created_by_fkey(id, email, first_name, last_name), " +
+  "updater:users!quotations_updated_by_fkey_main(id, email, first_name, last_name)";
+
 // ── GET /api/rfqs ──────────────────────────────────────────────────────────
 // TEAM VISIBILITY: everyone sees every RFQ. Mine/Team split happens client-side.
 export const getRFQs = async (req, res) => {
@@ -155,34 +172,42 @@ export const createRFQ = async (req, res) => {
 
     logRFQ(data.id, "created", userId, rfqSnapshot(req.body));
 
-    const sideInserts = [];
+    // Create the sample/quotation side-rows and ACTUALLY check for errors —
+    // previously this was fire-and-forget with the error silently dropped,
+    // which is how enquiries ended up with sample_required=true and no
+    // sample row at all. Awaited here (fast, and RFQ creation isn't
+    // considered fully successful until these are known to have worked).
+    const [sampleOutcome, quotationOutcome] = await Promise.all([
+      sample_required
+        ? supabaseAdmin.from("samples").insert([{
+            rfq_id: data.id, sample_required: true, sample_status: null,
+            follow_up_date: followup_date || null, follow_up_time: followup_time || null,
+            created_by: userId, updated_by: userId,
+          }]).select().single()
+        : Promise.resolve({ data: null, error: null }),
+      quotation_required
+        ? supabaseAdmin.from("quotations").insert([{
+            rfq_id: data.id, quotation_required: true, quotation_status: null,
+            follow_up_date: followup_date || null, follow_up_time: followup_time || null,
+            created_by: userId, updated_by: userId,
+          }]).select().single()
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+
     if (sample_required) {
-      sideInserts.push(
-        supabaseAdmin.from("samples").insert([{
-          rfq_id: data.id, sample_required: true,
-          sample_status: null,
-          follow_up_date: followup_date || null,   // ⬅ seeded from the enquiry's first follow-up
-          follow_up_time: followup_time || null,   // ⬅ seeded likewise
-          created_by: userId, updated_by: userId,
-        }]).select().single().then(({ data: s }) => {
-          if (s) logSample(s.id, "created", userId, { sample_status: null, follow_up_date: followup_date || null });
-        })
-      );
+      if (sampleOutcome.error) {
+        console.error("createRFQ: FAILED to create sample row for rfq", data.id, "-", sampleOutcome.error.message);
+      } else if (sampleOutcome.data) {
+        logSample(sampleOutcome.data.id, "created", userId, { sample_status: null, follow_up_date: followup_date || null });
+      }
     }
     if (quotation_required) {
-      sideInserts.push(
-        supabaseAdmin.from("quotations").insert([{
-          rfq_id: data.id, quotation_required: true,
-          quotation_status: null,
-          follow_up_date: followup_date || null,
-          follow_up_time: followup_time || null,
-          created_by: userId, updated_by: userId,
-        }]).select().single().then(({ data: q }) => {
-          if (q) logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: followup_date || null });
-        })
-      );
+      if (quotationOutcome.error) {
+        console.error("createRFQ: FAILED to create quotation row for rfq", data.id, "-", quotationOutcome.error.message);
+      } else if (quotationOutcome.data) {
+        logQuotation(quotationOutcome.data.id, "created", userId, { quotation_status: null, follow_up_date: followup_date || null });
+      }
     }
-    if (sideInserts.length) await Promise.all(sideInserts);
 
     if (salespersonEmail) sendMailAsync(rfqCreatedSalesperson({ salespersonEmail, rfq: data }));
     if (COORDINATOR_EMAIL && (sample_required || quotation_required)) {
@@ -226,14 +251,17 @@ export const updateRFQ = async (req, res) => {
     if (error) return res.status(400).json({ success: false, message: error.message });
     logRFQ(id, "updated", userId, rfqSnapshot(req.body));
 
-    // Sample toggle
+    // Sample toggle — awaited + error-checked (see FIXED note at top of file).
     if (sample_required && !existing.sample_required) {
-      supabaseAdmin.from("samples").insert([{
+      const { data: s, error: sErr } = await supabaseAdmin.from("samples").insert([{
         rfq_id: id, sample_required: true, sample_status: null, follow_up_date: null, created_by: userId, updated_by: userId,
-      }]).select().single().then(({ data: s }) => {
-        if (s) logSample(s.id, "created", userId, { sample_status: null, follow_up_date: null });
-      });
-      if (COORDINATOR_EMAIL) sendMailAsync(rfqCreatedCoordinator({ coordinatorEmail: COORDINATOR_EMAIL, rfq: data, salespersonEmail: salespersonEmail || "Unknown" }));
+      }]).select().single();
+      if (sErr) {
+        console.error("updateRFQ: FAILED to create sample row for rfq", id, "-", sErr.message);
+      } else if (s) {
+        logSample(s.id, "created", userId, { sample_status: null, follow_up_date: null });
+        if (COORDINATOR_EMAIL) sendMailAsync(rfqCreatedCoordinator({ coordinatorEmail: COORDINATOR_EMAIL, rfq: data, salespersonEmail: salespersonEmail || "Unknown" }));
+      }
     } else if (!sample_required && existing.sample_required) {
       const { data: sRow } = await supabaseAdmin.from("samples").select("id").eq("rfq_id", id).single();
       if (sRow) {
@@ -245,14 +273,17 @@ export const updateRFQ = async (req, res) => {
       }
     }
 
-    // Quotation toggle
+    // Quotation toggle — awaited + error-checked.
     if (quotation_required && !existing.quotation_required) {
-      supabaseAdmin.from("quotations").insert([{
+      const { data: q, error: qErr } = await supabaseAdmin.from("quotations").insert([{
         rfq_id: id, quotation_required: true, quotation_status: null, follow_up_date: null, created_by: userId, updated_by: userId,
-      }]).select().single().then(({ data: q }) => {
-        if (q) logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: null });
-      });
-      if (COORDINATOR_EMAIL) sendMailAsync(rfqCreatedCoordinator({ coordinatorEmail: COORDINATOR_EMAIL, rfq: data, salespersonEmail: salespersonEmail || "Unknown" }));
+      }]).select().single();
+      if (qErr) {
+        console.error("updateRFQ: FAILED to create quotation row for rfq", id, "-", qErr.message);
+      } else if (q) {
+        logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: null });
+        if (COORDINATOR_EMAIL) sendMailAsync(rfqCreatedCoordinator({ coordinatorEmail: COORDINATOR_EMAIL, rfq: data, salespersonEmail: salespersonEmail || "Unknown" }));
+      }
     } else if (!quotation_required && existing.quotation_required) {
       const { data: qRow } = await supabaseAdmin.from("quotations").select("id").eq("rfq_id", id).single();
       if (qRow) {
@@ -266,6 +297,201 @@ export const updateRFQ = async (req, res) => {
 
     return res.json({ success: true, rfq: data });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+};
+
+// ── PATCH /api/rfqs/:id/toggles ────────────────────────────────────────────
+// A narrow, dedicated edit surface for exactly the three fields a user is
+// allowed to fix after an enquiry has already been created — sample_required,
+// quotation_required, and tds_available. Deliberately does NOT touch any
+// other rfq column: calling the full updateRFQ with a partial body would
+// blank out everything the caller didn't send.
+//
+// Turning Sample/Quotation ON creates the matching row (same as the toggle
+// logic in updateRFQ); turning it OFF hard-deletes that row and its logs —
+// there's no "undo" once the checkbox is unchecked and saved.
+export const updateRFQToggles = async (req, res) => {
+  try {
+    const id = req.params.id || req.params.rfqId;
+    const { id: userId } = req.user;
+    if (!id) {
+      console.error("updateRFQToggles: no rfq id in route params —", JSON.stringify(req.params));
+      return res.status(400).json({ success: false, message: "Missing rfq id in request" });
+    }
+
+    const sample_required    = !!req.body.sample_required;
+    const quotation_required = !!req.body.quotation_required;
+    const tds_available      = !!req.body.tds_available;
+
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from("rfqs")
+      .select("id, sample_required, quotation_required, tds_available")
+      .eq("id", id)
+      .is("deleted_at", null)
+      .single();
+    if (fetchErr || !existing) {
+      console.error("updateRFQToggles: rfq not found for id", id, "-", fetchErr?.message);
+      return res.status(404).json({ success: false, message: `RFQ not found for id ${id}` });
+    }
+
+    // Once an enquiry has been converted to an order, its Sample/Quotation
+    // shouldn't be edited out from under that order — point the user at
+    // reverting the order first instead.
+    const { data: existingOrder } = await supabaseAdmin
+      .from("orders").select("id").eq("rfq_id", id).is("deleted_at", null).maybeSingle();
+    if (existingOrder) {
+      return res.status(400).json({
+        success: false,
+        message: "This enquiry has already been converted to an order — revert the order before editing Sample/Quotation.",
+      });
+    }
+
+    const { data: updatedRfq, error: updateErr } = await supabaseAdmin
+      .from("rfqs")
+      .update({ sample_required, quotation_required, tds_available, updated_by: userId, updated_at: nowUTC() })
+      .eq("id", id)
+      .select("id, sample_required, quotation_required, tds_available")
+      .single();
+    if (updateErr) return res.status(400).json({ success: false, message: updateErr.message });
+
+    logRFQ(id, "sample_quotation_toggled", userId, { sample_required, quotation_required, tds_available });
+
+    const result = { sample: null, quotation: null, sampleRemoved: false, quotationRemoved: false };
+
+    // Sample: OFF → ON
+    if (sample_required && !existing.sample_required) {
+      const { data: s, error: sErr } = await supabaseAdmin
+        .from("samples")
+        .insert([{ rfq_id: id, sample_required: true, sample_status: null, created_by: userId, updated_by: userId }])
+        .select(SAMPLE_WITH_CREATOR_UPDATER)
+        .single();
+      if (sErr) console.error("updateRFQToggles: FAILED to create sample row for rfq", id, "-", sErr.message);
+      else if (s) {
+        logSample(s.id, "created", userId, { sample_status: null, follow_up_date: null });
+        result.sample = s;
+      }
+    }
+    // Sample: ON → OFF
+    else if (!sample_required && existing.sample_required) {
+      const { data: sRow } = await supabaseAdmin.from("samples").select("id, sample_status")
+        .eq("rfq_id", id).is("deleted_at", null).maybeSingle();
+      if (sRow) {
+        logSample(sRow.id, "deleted", userId, { sample_status: sRow.sample_status, follow_up_date: null });
+        await Promise.all([
+          supabaseAdmin.from("sample_logs").delete().eq("sample_id", sRow.id),
+          supabaseAdmin.from("samples").delete().eq("id", sRow.id),
+        ]);
+      }
+      result.sampleRemoved = true;
+    }
+
+    // Quotation: OFF → ON
+    if (quotation_required && !existing.quotation_required) {
+      const { data: q, error: qErr } = await supabaseAdmin
+        .from("quotations")
+        .insert([{ rfq_id: id, quotation_required: true, quotation_status: null, created_by: userId, updated_by: userId }])
+        .select(QUOTATION_WITH_CREATOR_UPDATER)
+        .single();
+      if (qErr) console.error("updateRFQToggles: FAILED to create quotation row for rfq", id, "-", qErr.message);
+      else if (q) {
+        logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: null });
+        result.quotation = q;
+      }
+    }
+    // Quotation: ON → OFF
+    else if (!quotation_required && existing.quotation_required) {
+      const { data: qRow } = await supabaseAdmin.from("quotations").select("id, quotation_status")
+        .eq("rfq_id", id).is("deleted_at", null).maybeSingle();
+      if (qRow) {
+        logQuotation(qRow.id, "deleted", userId, { quotation_status: qRow.quotation_status, follow_up_date: null });
+        await Promise.all([
+          supabaseAdmin.from("quotation_logs").delete().eq("quotation_id", qRow.id),
+          supabaseAdmin.from("quotations").delete().eq("id", qRow.id),
+        ]);
+      }
+      result.quotationRemoved = true;
+    }
+
+    return res.json({ success: true, rfq: updatedRfq, ...result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// Self-heal: an enquiry can end up with sample_required/quotation_required
+// = true but no matching row (see FIXED note above — old silent insert
+// failures). This creates whichever row(s) are actually missing (or just
+// hands back the existing one) so the "No record found" dead-end in the UI
+// has a one-click fix instead of needing a manual DB repair.
+export const ensureSampleQuotation = async (req, res) => {
+  try {
+    // Tolerant of either route param name — this file mixes `:id` (e.g.
+    // updateRFQ/deleteRFQ) and `:rfqId` (e.g. getFollowups/createFollowup)
+    // depending on the endpoint, so whichever your router uses for this
+    // route works without needing an exact match.
+    const id = req.params.id || req.params.rfqId;
+    const { id: userId } = req.user;
+
+    if (!id) {
+      console.error("ensureSampleQuotation: no rfq id in route params —", JSON.stringify(req.params));
+      return res.status(400).json({ success: false, message: "Missing rfq id in request" });
+    }
+
+    const { data: rfq, error: rfqErr } = await supabaseAdmin
+      .from("rfqs")
+      .select("id, sample_required, quotation_required")
+      .eq("id", id)
+      .is("deleted_at", null)
+      .single();
+    if (rfqErr || !rfq) {
+      console.error("ensureSampleQuotation: rfq not found for id", id, "-", rfqErr?.message);
+      return res.status(404).json({ success: false, message: `RFQ not found for id ${id}` });
+    }
+
+    const result = { sample: null, quotation: null };
+
+    if (rfq.sample_required) {
+      const { data: existingSample } = await supabaseAdmin
+        .from("samples").select(SAMPLE_WITH_CREATOR_UPDATER)
+        .eq("rfq_id", id).is("deleted_at", null).maybeSingle();
+
+      if (existingSample) {
+        result.sample = existingSample;
+      } else {
+        const { data: s, error: sErr } = await supabaseAdmin
+          .from("samples")
+          .insert([{ rfq_id: id, sample_required: true, sample_status: null, created_by: userId, updated_by: userId }])
+          .select(SAMPLE_WITH_CREATOR_UPDATER)
+          .single();
+        if (sErr) return res.status(400).json({ success: false, message: "Failed to create sample record: " + sErr.message });
+        logSample(s.id, "created", userId, { sample_status: null, follow_up_date: null });
+        result.sample = s;
+      }
+    }
+
+    if (rfq.quotation_required) {
+      const { data: existingQuote } = await supabaseAdmin
+        .from("quotations").select(QUOTATION_WITH_CREATOR_UPDATER)
+        .eq("rfq_id", id).is("deleted_at", null).maybeSingle();
+
+      if (existingQuote) {
+        result.quotation = existingQuote;
+      } else {
+        const { data: q, error: qErr } = await supabaseAdmin
+          .from("quotations")
+          .insert([{ rfq_id: id, quotation_required: true, quotation_status: null, created_by: userId, updated_by: userId }])
+          .select(QUOTATION_WITH_CREATOR_UPDATER)
+          .single();
+        if (qErr) return res.status(400).json({ success: false, message: "Failed to create quotation record: " + qErr.message });
+        logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: null });
+        result.quotation = q;
+      }
+    }
+
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 // ── DELETE /api/rfqs/:id ───────────────────────────────────────────────────
@@ -294,6 +520,9 @@ export const deleteRFQ = async (req, res) => {
       supabaseAdmin.from("samples").update({ deleted_at: now }).eq("rfq_id", id).is("deleted_at", null),
       supabaseAdmin.from("quotations").update({ deleted_at: now }).eq("rfq_id", id).is("deleted_at", null),
       supabaseAdmin.from("rfq_followups").update({ deleted_at: now }).eq("rfq_id", id).is("deleted_at", null),
+      // Deleting the enquiry directly should also drop it out of the Orders
+      // tab if it had already been converted.
+      supabaseAdmin.from("orders").update({ deleted_at: now }).eq("rfq_id", id).is("deleted_at", null),
     ]);
 
     const { error } = await supabaseAdmin.from("rfqs").update({ deleted_at: now, updated_by: userId }).eq("id", id);
