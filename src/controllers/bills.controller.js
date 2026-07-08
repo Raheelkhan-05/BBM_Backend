@@ -8,16 +8,37 @@ const supabaseAdmin = createClient(
 );
 
 const nowUTC = () => new Date().toISOString();
+const todayISO = () => nowUTC().slice(0, 10);
 
 const WITH_USERS =
   "*, creator:users!bills_created_by_fkey(id, email, first_name, last_name), " +
-  "updater:users!bills_updated_by_fkey(id, email, first_name, last_name)";
+  "updater:users!bills_updated_by_fkey(id, email, first_name, last_name), " +
+  "cheques:bill_cheques(*)";
 
 function logBill(billId, action, changedBy, extra = {}) {
   supabaseAdmin
     .from("bill_logs")
     .insert([{ bill_id: billId, action, changed_by: changedBy, changed_at: nowUTC(), ...extra }])
     .then(({ error }) => { if (error) console.error("bill_logs write error:", error.message); });
+}
+
+// Adds a derived `collection_active` (+ `collection_active_is_manual`) flag
+// to a bill row. Manual override (collection_active_manual true/false) wins;
+// otherwise it's auto-derived from whether due_date has been reached.
+function withCollectionActive(bill) {
+  if (!bill) return bill;
+  const manual = bill.collection_active_manual;
+  const isManual = manual === true || manual === false;
+  const auto = bill.due_date ? bill.due_date <= todayISO() : false;
+  const cheques = Array.isArray(bill.cheques)
+    ? [...bill.cheques].sort((a, b) => new Date(b.recorded_at) - new Date(a.recorded_at))
+    : bill.cheques;
+  return {
+    ...bill,
+    cheques,
+    collection_active: isManual ? manual : auto,
+    collection_active_is_manual: isManual,
+  };
 }
 
 // Scans the raw sheet for the row that actually contains our known headers
@@ -38,14 +59,17 @@ function normalizeKey(k) {
 
 /* ── Column mapping for the "New Sales Dump" format ─────────────────────
    New export columns:
-   Bill Date | Bill No | C/D | Party Name | City Name | Party GSTIN No |
-   Mobile-1 | Mobile-2 | Discount Amount | P & F Charges Amount |
-   Freight Amount | Assessable Amount | GST columns... |
+   Credit Days | Bill Date | Bill No | C/D | Party Name | City Name |
+   Party GSTIN No | Mobile-1 | Mobile-2 | Discount Amount | P & F Charges
+   Amount | Freight Amount | Assessable Amount | GST columns... |
    Product Name | Product Group Name | Product Category Name | Sales Man |
    Bill Amount
 
-   KEY DIFFERENCE from old format:
+   KEY DIFFERENCES from old format:
    - Mobile-1 and Mobile-2 are now present in this export (were absent before)
+   - Credit Days is now present — number of days after Bill Date before the
+     bill is due for collection. due_date = bill_date + credit_days
+     (computed by the DB as a generated column).
    - One row per product line item per bill — Bill Amount is the total bill
      value repeated on every line. We deduplicate by Bill No (first row wins).
    - No "Balance Amt" column — balance_amount starts equal to bill_amount.
@@ -55,20 +79,21 @@ function normalizeKey(k) {
 const KEY_MAP = {
   // New format columns
   partyname:            "party_name",
-  billno:               "bill_no",
-  billdate:             "bill_date",
-  billamount:           "bill_amount",
-  cityname:             "location",
-  mobile1:              "mobile_1",
-  mobile2:              "mobile_2",
-  partygstinno:         "party_gstin",
-  cd:                   "cd_type",
+  billno:                "bill_no",
+  billdate:               "bill_date",
+  billamount:            "bill_amount",
+  cityname:              "location",
+  mobile1:               "mobile_1",
+  mobile2:               "mobile_2",
+  partygstinno:          "party_gstin",
+  cd:                    "cd_type",
+  creditdays:            "credit_days",
   // Legacy / old-format columns (kept for backward compatibility)
-  location:             "location",
-  duedays:              "due_days",
-  balanceamtcumulative: "balance_amount",
-  balanceamt:           "balance_amount",
-  balanceamount:        "balance_amount",
+  location:              "location",
+  duedays:               "credit_days", // old exports called this "Due Days"
+  balanceamtcumulative:  "balance_amount",
+  balanceamt:            "balance_amount",
+  balanceamount:         "balance_amount",
 };
 
 function excelSerialToISO(serial) {
@@ -125,12 +150,14 @@ function parseRow(row) {
   if (!mapped.party_name || !mapped.bill_no) return null;
 
   const billAmount = Number(mapped.bill_amount) || 0;
+  const creditDays = Number(mapped.credit_days);
 
   return {
     party_name:     String(mapped.party_name).trim(),
     bill_no:        String(mapped.bill_no).trim(),
     bill_date:      excelDateToISO(mapped.bill_date),
     bill_amount:    billAmount,
+    credit_days:    Number.isFinite(creditDays) && creditDays >= 0 ? Math.round(creditDays) : 0,
     // New format has no Balance Amt column — full bill is outstanding on import.
     // Old format's balance_amount is preserved when the column exists.
     balance_amount: mapped.balance_amount !== undefined
@@ -169,8 +196,8 @@ export const uploadBills = async (req, res) => {
     // ── Deduplication ──────────────────────────────────────────────────
     // The new Sales Dump format has ONE ROW PER PRODUCT LINE ITEM per bill.
     // E.g. a bill with 3 products appears as 3 rows, all with the same
-    // Bill No and Bill Amount (the bill total, not a per-product subtotal).
-    // We keep only the FIRST row per Bill No and discard the rest.
+    // Bill No, Bill Amount, and Credit Days. We keep only the FIRST row
+    // per Bill No and discard the rest.
     const seenBillNos = new Set();
     const parsed = [];
     const skipped = [];
@@ -219,7 +246,14 @@ export const uploadBills = async (req, res) => {
 
     const toInsert = parsed
       .filter(b => !existingSet.has(b.bill_no))
-      .map(b => ({ ...b, status: "remaining", created_by: userId, updated_by: userId }));
+      .map(b => ({
+        ...b,
+        status: "remaining",
+        created_by: userId,
+        updated_by: userId,
+        // collection_active_manual left null — starts on automatic
+        // (bill_date + credit_days) logic, same as every other new bill.
+      }));
 
     const results = {
       inserted: 0,
@@ -273,7 +307,7 @@ export const getBills = async (req, res) => {
       .is("deleted_at", null)
       .order("bill_date", { ascending: true });
     if (error) return res.status(400).json({ success: false, message: error.message });
-    return res.json({ success: true, bills: data });
+    return res.json({ success: true, bills: (data || []).map(withCollectionActive) });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -322,14 +356,23 @@ export const addFollowup = async (req, res) => {
     if (error) return res.status(400).json({ success: false, message: error.message });
 
     logBill(id, "followup", userId, { remark, reason, next_followup_date: next_followup_date || null });
-    return res.json({ success: true, bill: data });
+    return res.json({ success: true, bill: withCollectionActive(data) });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
 
 // ── PUT /api/bills/:id/payment ────────────────────────────────────
-// Body: { amount, remark, next_followup_date }
+// Body: { amount, remark, next_followup_date, payment_mode, cheque_date, cheque_no, bank_name }
+//
+// payment_mode: "cash" | "upi" | "bank_transfer" | "cheque" (default "cash")
+//
+// If payment_mode is "cheque" and cheque_date is in the future, the payment
+// is NOT applied yet. It's parked in bill_cheques as "pending" and the bill
+// moves to status "cheque_pending" (excluded from both the Remaining and
+// Completed views) with next_followup_date set to the cheque date as a
+// reminder. Use PUT /:id/cheque/:chequeId/clear once the cheque actually
+// clears, or /bounce if it doesn't.
 export const collectPayment = async (req, res) => {
   try {
     const { id } = req.params;
@@ -337,6 +380,10 @@ export const collectPayment = async (req, res) => {
     const amount = Number(req.body.amount);
     const remark = req.body.remark || null;
     const nextFollowup = req.body.next_followup_date || null;
+    const paymentMode = (req.body.payment_mode || "cash").toLowerCase();
+    const chequeDate = req.body.cheque_date || null;
+    const chequeNo = req.body.cheque_no || null;
+    const bankName = req.body.bank_name || null;
 
     if (!amount || amount <= 0) return res.status(400).json({ success: false, message: "Enter a valid amount" });
 
@@ -352,6 +399,55 @@ export const collectPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: "Amount exceeds balance" });
     }
 
+    const isPostDatedCheque = paymentMode === "cheque" && chequeDate && chequeDate > todayISO();
+
+    // ── Post-dated cheque: park it, don't touch the balance yet ─────────
+    if (isPostDatedCheque) {
+      const { data: openCheque } = await supabaseAdmin
+        .from("bill_cheques")
+        .select("id")
+        .eq("bill_id", id)
+        .eq("status", "pending")
+        .maybeSingle();
+      if (openCheque) {
+        return res.status(409).json({
+          success: false,
+          message: "This bill already has a pending cheque. Resolve it (mark received/bounced) before recording another.",
+        });
+      }
+
+      const { data: cheque, error: chequeErr } = await supabaseAdmin
+        .from("bill_cheques")
+        .insert([{
+          bill_id: id, amount, cheque_no: chequeNo, bank_name: bankName,
+          cheque_date: chequeDate, remark, recorded_by: userId,
+        }])
+        .select("*")
+        .single();
+      if (chequeErr) return res.status(400).json({ success: false, message: chequeErr.message });
+
+      const { data, error } = await supabaseAdmin
+        .from("bills")
+        .update({
+          status: "cheque_pending",
+          next_followup_date: chequeDate,
+          updated_by: userId,
+          updated_at: nowUTC(),
+        })
+        .eq("id", id)
+        .select(WITH_USERS)
+        .single();
+      if (error) return res.status(400).json({ success: false, message: error.message });
+
+      logBill(id, "cheque_recorded", userId, {
+        remark, payment_collected: amount, status: "cheque_pending",
+        next_followup_date: chequeDate,
+      });
+
+      return res.json({ success: true, bill: withCollectionActive(data) });
+    }
+
+    // ── Immediate payment (cash / UPI / bank transfer / already-due cheque) ─
     const newBalance   = Math.max(0, Number(existing.balance_amount) - amount);
     const newCollected = Number(existing.payment_collected || 0) + amount;
     const newStatus    = newBalance <= 0 ? "completed" : "remaining";
@@ -384,7 +480,169 @@ export const collectPayment = async (req, res) => {
       next_followup_date: newStatus === "remaining" ? nextFollowup : null,
     });
 
-    return res.json({ success: true, bill: data });
+    return res.json({ success: true, bill: withCollectionActive(data) });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── PUT /api/bills/:id/collection-toggle ──────────────────────────
+// Body: { active: true | false | null }
+// null resets the bill back to automatic (bill_date + credit_days) logic.
+export const setCollectionActive = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { id: userId } = req.user;
+    const { active } = req.body;
+
+    if (active !== null && typeof active !== "boolean") {
+      return res.status(400).json({ success: false, message: "'active' must be true, false, or null" });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from("bills")
+      .update({
+        collection_active_manual: active,
+        collection_active_updated_by: userId,
+        collection_active_updated_at: nowUTC(),
+        updated_by: userId,
+        updated_at: nowUTC(),
+      })
+      .eq("id", id)
+      .is("deleted_at", null)
+      .select(WITH_USERS)
+      .single();
+
+    if (error) return res.status(400).json({ success: false, message: error.message });
+
+    logBill(id, "collection_toggle", userId, {
+      remark: active === null
+        ? "Reset to automatic (credit-days) logic"
+        : `Manually turned collection ${active ? "ON" : "OFF"}`,
+    });
+
+    return res.json({ success: true, bill: withCollectionActive(data) });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── PUT /api/bills/:id/cheque/:chequeId/clear ─────────────────────
+// Body: { next_followup_date?, remark? }  (next_followup_date required
+// only if the cheque amount doesn't fully clear the balance)
+export const clearCheque = async (req, res) => {
+  try {
+    const { id, chequeId } = req.params;
+    const { id: userId } = req.user;
+    const nextFollowup = req.body.next_followup_date || null;
+    const remark = req.body.remark || null;
+
+    const { data: cheque, error: chequeErr } = await supabaseAdmin
+      .from("bill_cheques")
+      .select("*")
+      .eq("id", chequeId)
+      .eq("bill_id", id)
+      .single();
+    if (chequeErr || !cheque) return res.status(404).json({ success: false, message: "Cheque record not found" });
+    if (cheque.status !== "pending") return res.status(400).json({ success: false, message: "This cheque has already been resolved" });
+
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from("bills")
+      .select("balance_amount, payment_collected")
+      .eq("id", id)
+      .is("deleted_at", null)
+      .single();
+    if (fetchErr) return res.status(404).json({ success: false, message: "Bill not found" });
+
+    const amount = Number(cheque.amount);
+    const newBalance   = Math.max(0, Number(existing.balance_amount) - amount);
+    const newCollected = Number(existing.payment_collected || 0) + amount;
+    const newStatus    = newBalance <= 0 ? "completed" : "remaining";
+
+    if (newStatus === "remaining" && !nextFollowup) {
+      return res.status(400).json({ success: false, message: "Next follow-up date is required — balance still remains after this cheque" });
+    }
+
+    const { error: cErr } = await supabaseAdmin
+      .from("bill_cheques")
+      .update({ status: "cleared", resolved_by: userId, resolved_at: nowUTC() })
+      .eq("id", chequeId);
+    if (cErr) return res.status(400).json({ success: false, message: cErr.message });
+
+    const { data, error } = await supabaseAdmin
+      .from("bills")
+      .update({
+        balance_amount: newBalance,
+        payment_collected: newCollected,
+        status: newStatus,
+        next_followup_date: newStatus === "completed" ? null : nextFollowup,
+        updated_by: userId,
+        updated_at: nowUTC(),
+      })
+      .eq("id", id)
+      .select(WITH_USERS)
+      .single();
+    if (error) return res.status(400).json({ success: false, message: error.message });
+
+    logBill(id, "cheque_cleared", userId, {
+      remark,
+      payment_collected: amount,
+      balance_after: newBalance,
+      status: newStatus,
+      next_followup_date: newStatus === "remaining" ? nextFollowup : null,
+    });
+
+    return res.json({ success: true, bill: withCollectionActive(data) });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── PUT /api/bills/:id/cheque/:chequeId/bounce ────────────────────
+// Body: { next_followup_date, remark? }  — next_followup_date is required
+// since the bill goes back to "remaining" and needs to stay in the chase queue.
+export const bounceCheque = async (req, res) => {
+  try {
+    const { id, chequeId } = req.params;
+    const { id: userId } = req.user;
+    const remark = req.body.remark || null;
+    const nextFollowup = req.body.next_followup_date || null;
+
+    if (!nextFollowup) return res.status(400).json({ success: false, message: "Next follow-up date is required" });
+
+    const { data: cheque, error: chequeErr } = await supabaseAdmin
+      .from("bill_cheques")
+      .select("*")
+      .eq("id", chequeId)
+      .eq("bill_id", id)
+      .single();
+    if (chequeErr || !cheque) return res.status(404).json({ success: false, message: "Cheque record not found" });
+    if (cheque.status !== "pending") return res.status(400).json({ success: false, message: "This cheque has already been resolved" });
+
+    const { error: cErr } = await supabaseAdmin
+      .from("bill_cheques")
+      .update({ status: "bounced", resolved_by: userId, resolved_at: nowUTC(), remark })
+      .eq("id", chequeId);
+    if (cErr) return res.status(400).json({ success: false, message: cErr.message });
+
+    const { data, error } = await supabaseAdmin
+      .from("bills")
+      .update({
+        status: "remaining",
+        next_followup_date: nextFollowup,
+        updated_by: userId,
+        updated_at: nowUTC(),
+      })
+      .eq("id", id)
+      .select(WITH_USERS)
+      .single();
+    if (error) return res.status(400).json({ success: false, message: error.message });
+
+    logBill(id, "cheque_bounced", userId, {
+      remark, status: "remaining", next_followup_date: nextFollowup,
+    });
+
+    return res.json({ success: true, bill: withCollectionActive(data) });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -392,13 +650,15 @@ export const collectPayment = async (req, res) => {
 
 function extractBillFields(body) {
   const {
-    party_name, bill_no, bill_date,
+    party_name, bill_no, bill_date, credit_days,
     bill_amount, balance_amount, location, mobile_1, mobile_2,
   } = body;
+  const creditDaysNum = Number(credit_days);
   return {
     party_name:     (party_name || "").trim(),
     bill_no:        (bill_no || "").trim(),
     bill_date:      bill_date || null,
+    credit_days:    Number.isFinite(creditDaysNum) && creditDaysNum >= 0 ? Math.round(creditDaysNum) : 0,
     bill_amount:    Number(bill_amount) || 0,
     balance_amount: balance_amount !== undefined && balance_amount !== ""
       ? Number(balance_amount)
@@ -435,7 +695,7 @@ export const createBill = async (req, res) => {
     if (error) return res.status(400).json({ success: false, message: error.message });
 
     logBill(data.id, "created", userId, { remark: "Added manually" });
-    return res.status(201).json({ success: true, bill: data });
+    return res.status(201).json({ success: true, bill: withCollectionActive(data) });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -485,7 +745,7 @@ export const updateBill = async (req, res) => {
     });
 
     logBill(id, "edited", userId, { remark: JSON.stringify(changedFields) });
-    return res.json({ success: true, bill: data });
+    return res.json({ success: true, bill: withCollectionActive(data) });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -510,12 +770,18 @@ export const deleteBill = async (req, res) => {
       .eq("bill_id", id)
       .order("changed_at", { ascending: true });
 
+    const { data: cheques } = await supabaseAdmin
+      .from("bill_cheques")
+      .select("*")
+      .eq("bill_id", id)
+      .order("recorded_at", { ascending: true });
+
     const { error: auditErr } = await supabaseAdmin
       .from("bill_deletion_logs")
       .insert([{
         bill_id:    id,
         deleted_by: userId,
-        snapshot:   { bill, history: history || [] },
+        snapshot:   { bill, history: history || [], cheques: cheques || [] },
       }]);
     if (auditErr) {
       return res.status(500).json({ success: false, message: "Failed to log deletion, aborted: " + auditErr.message });

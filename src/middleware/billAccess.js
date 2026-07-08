@@ -22,6 +22,13 @@ const ADD_ALLOWED = new Set([
   "account@bbmpvtltd.com",
 ]);
 
+// Manual override of the Collection Active toggle, and resolving
+// pending cheques (mark received / bounced).
+const COLLECTION_TOGGLE_ALLOWED = new Set([
+  "account@bbmpvtltd.com",
+  "communication@bbmpvtltd.com",
+]);
+
 function norm(email) {
   return (email || "").trim().toLowerCase();
 }
@@ -54,6 +61,14 @@ export function requireBillEditDeleteAccess(req, res, next) {
   const email = norm(req.user?.email);
   if (!EDIT_DELETE_ALLOWED.has(email)) {
     return res.status(403).json({ success: false, message: "Only Communication team can edit or delete bill records" });
+  }
+  next();
+}
+
+export function requireBillToggleAccess(req, res, next) {
+  const email = norm(req.user?.email);
+  if (!COLLECTION_TOGGLE_ALLOWED.has(email)) {
+    return res.status(403).json({ success: false, message: "Only Account/Communication team can override collection status or resolve cheques" });
   }
   next();
 }
