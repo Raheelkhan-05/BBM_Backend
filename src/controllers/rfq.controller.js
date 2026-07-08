@@ -394,17 +394,36 @@ export const updateRFQToggles = async (req, res) => {
 
     let seedDate = null, seedTime = null;
     if ((sample_required && !existing.sample_required) || (quotation_required && !existing.quotation_required)) {
-      const { data: latestFollowup } = await supabaseAdmin
-        .from("rfq_followups")
-        .select("followup_date, notes")
-        .eq("rfq_id", id)
-        .is("deleted_at", null)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      seedDate = latestFollowup?.followup_date || null;
-      const timeMatch = /^\[Time:\s*(\d{2}:\d{2})\]/.exec(latestFollowup?.notes || "");
-      seedTime = timeMatch ? timeMatch[1] : null;
+      // Sample and quotation share one follow-up date now. If the sibling
+      // record already exists (e.g. sample is being turned on but a
+      // quotation row already has a date), seed the new row from THAT
+      // instead of the last general follow-up — otherwise the two would
+      // start out on different dates and immediately split apart again.
+      const [{ data: sibSample }, { data: sibQuote }] = await Promise.all([
+        supabaseAdmin.from("samples").select("follow_up_date, follow_up_time")
+          .eq("rfq_id", id).is("deleted_at", null).maybeSingle(),
+        supabaseAdmin.from("quotations").select("follow_up_date, follow_up_time")
+          .eq("rfq_id", id).is("deleted_at", null).maybeSingle(),
+      ]);
+      const sibDate = sibSample?.follow_up_date || sibQuote?.follow_up_date || null;
+      const sibTime = sibSample?.follow_up_time || sibQuote?.follow_up_time || null;
+
+      if (sibDate) {
+        seedDate = sibDate;
+        seedTime = sibTime;
+      } else {
+        const { data: latestFollowup } = await supabaseAdmin
+          .from("rfq_followups")
+          .select("followup_date, notes")
+          .eq("rfq_id", id)
+          .is("deleted_at", null)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        seedDate = latestFollowup?.followup_date || null;
+        const timeMatch = /^\[Time:\s*(\d{2}:\d{2})\]/.exec(latestFollowup?.notes || "");
+        seedTime = timeMatch ? timeMatch[1] : null;
+      }
     }
 
     if (sample_required && !existing.sample_required) {
@@ -510,13 +529,29 @@ export const ensureSampleQuotation = async (req, res) => {
       if (existingSample) {
         result.sample = existingSample;
       } else {
+        // Self-healing a missing sample row — if a quotation already
+        // exists for this enquiry, inherit its follow-up date/time so the
+        // newly-created sample doesn't start out on a different due date.
+        const { data: sibQuote } = await supabaseAdmin
+          .from("quotations").select("follow_up_date, follow_up_time")
+          .eq("rfq_id", id).is("deleted_at", null).maybeSingle();
+
         const { data: s, error: sErr } = await supabaseAdmin
           .from("samples")
-          .insert([{ rfq_id: id, sample_required: true, sample_status: null, created_by: userId, updated_by: userId }])
+          .insert([{
+            rfq_id: id, sample_required: true, sample_status: null,
+            follow_up_date: sibQuote?.follow_up_date || null,
+            follow_up_time: sibQuote?.follow_up_time || null,
+            created_by: userId, updated_by: userId,
+          }])
           .select(SAMPLE_WITH_CREATOR_UPDATER)
           .single();
         if (sErr) return res.status(400).json({ success: false, message: "Failed to create sample record: " + sErr.message });
-        logSample(s.id, "created", userId, { sample_status: null, follow_up_date: null });
+        logSample(s.id, "created", userId, {
+          sample_status: null,
+          follow_up_date: sibQuote?.follow_up_date || null,
+          follow_up_time: sibQuote?.follow_up_time || null,
+        });
         result.sample = s;
       }
     }
@@ -529,13 +564,27 @@ export const ensureSampleQuotation = async (req, res) => {
       if (existingQuote) {
         result.quotation = existingQuote;
       } else {
+        // Same self-heal, mirrored — inherit the sample's date if one exists.
+        const { data: sibSample } = await supabaseAdmin
+          .from("samples").select("follow_up_date, follow_up_time")
+          .eq("rfq_id", id).is("deleted_at", null).maybeSingle();
+
         const { data: q, error: qErr } = await supabaseAdmin
           .from("quotations")
-          .insert([{ rfq_id: id, quotation_required: true, quotation_status: null, created_by: userId, updated_by: userId }])
+          .insert([{
+            rfq_id: id, quotation_required: true, quotation_status: null,
+            follow_up_date: sibSample?.follow_up_date || null,
+            follow_up_time: sibSample?.follow_up_time || null,
+            created_by: userId, updated_by: userId,
+          }])
           .select(QUOTATION_WITH_CREATOR_UPDATER)
           .single();
         if (qErr) return res.status(400).json({ success: false, message: "Failed to create quotation record: " + qErr.message });
-        logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: null });
+        logQuotation(q.id, "created", userId, {
+          quotation_status: null,
+          follow_up_date: sibSample?.follow_up_date || null,
+          follow_up_time: sibSample?.follow_up_time || null,
+        });
         result.quotation = q;
       }
     }

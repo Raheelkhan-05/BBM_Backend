@@ -17,6 +17,26 @@ const COORDINATOR_EMAIL = process.env.SALES_COORDINATOR_EMAIL;
 const sendMailAsync = (opts) =>
   sendMail(opts).catch((e) => console.error("Mail error:", e.message));
 
+function syncSiblingFollowUp(rfqId, table, follow_up_date, follow_up_time) {
+  if (!rfqId) return;
+  supabaseAdmin
+    .from(table)
+    .select("id")
+    .eq("rfq_id", rfqId)
+    .is("deleted_at", null)
+    .maybeSingle()
+    .then(({ data: sibling, error }) => {
+      if (error || !sibling) return;
+      supabaseAdmin
+        .from(table)
+        .update({ follow_up_date: follow_up_date || null, follow_up_time: follow_up_time || null })
+        .eq("id", sibling.id)
+        .then(({ error: updErr }) => {
+          if (updErr) console.error(`sync follow-up -> ${table}:`, updErr.message);
+        });
+    });
+}
+
 // GET /api/quotations
 export const getQuotations = async (req, res) => {
   try {
@@ -147,6 +167,7 @@ export const updateQuotation = async (req, res) => {
       syncRfqStatus(rfqId, userId).catch((e) =>
         console.error("syncRfqStatus (quotation):", e.message)
       );
+      syncSiblingFollowUp(rfqId, "samples", follow_up_date, req.body.follow_up_time);
     }
 
     return res.json({ success: true, quotation: updated });
