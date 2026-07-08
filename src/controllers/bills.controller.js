@@ -330,7 +330,6 @@ export const getBillLogs = async (req, res) => {
 };
 
 // ── PUT /api/bills/:id/followup ──────────────────────────────────
-// Body: { remark, reason, next_followup_date }
 export const addFollowup = async (req, res) => {
   try {
     const { id } = req.params;
@@ -338,6 +337,14 @@ export const addFollowup = async (req, res) => {
     const { remark, reason, next_followup_date } = req.body;
 
     if (!reason?.trim()) return res.status(400).json({ success: false, message: "Reason is required" });
+
+    const { data: before, error: beforeErr } = await supabaseAdmin
+      .from("bills")
+      .select("status, last_remark, last_reason, next_followup_date")
+      .eq("id", id)
+      .is("deleted_at", null)
+      .single();
+    if (beforeErr) return res.status(404).json({ success: false, message: "Bill not found" });
 
     const { data, error } = await supabaseAdmin
       .from("bills")
@@ -355,7 +362,10 @@ export const addFollowup = async (req, res) => {
 
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    logBill(id, "followup", userId, { remark, reason, next_followup_date: next_followup_date || null });
+    logBill(id, "followup", userId, {
+      remark, reason, next_followup_date: next_followup_date || null,
+      snapshot: { bill: before, cheque: null },
+    });
     return res.json({ success: true, bill: withCollectionActive(data) });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -373,6 +383,7 @@ export const addFollowup = async (req, res) => {
 // Completed views) with next_followup_date set to the cheque date as a
 // reminder. Use PUT /:id/cheque/:chequeId/clear once the cheque actually
 // clears, or /bounce if it doesn't.
+// ── PUT /api/bills/:id/payment ────────────────────────────────────
 export const collectPayment = async (req, res) => {
   try {
     const { id } = req.params;
@@ -389,7 +400,7 @@ export const collectPayment = async (req, res) => {
 
     const { data: existing, error: fetchErr } = await supabaseAdmin
       .from("bills")
-      .select("balance_amount, payment_collected")
+      .select("status, balance_amount, payment_collected, next_followup_date")
       .eq("id", id)
       .is("deleted_at", null)
       .single();
@@ -401,7 +412,6 @@ export const collectPayment = async (req, res) => {
 
     const isPostDatedCheque = paymentMode === "cheque" && chequeDate && chequeDate > todayISO();
 
-    // ── Post-dated cheque: park it, don't touch the balance yet ─────────
     if (isPostDatedCheque) {
       const { data: openCheque } = await supabaseAdmin
         .from("bill_cheques")
@@ -442,12 +452,15 @@ export const collectPayment = async (req, res) => {
       logBill(id, "cheque_recorded", userId, {
         remark, payment_collected: amount, status: "cheque_pending",
         next_followup_date: chequeDate,
+        snapshot: {
+          bill: { status: existing.status, next_followup_date: existing.next_followup_date },
+          cheque: { created: true, id: cheque.id },
+        },
       });
 
       return res.json({ success: true, bill: withCollectionActive(data) });
     }
 
-    // ── Immediate payment (cash / UPI / bank transfer / already-due cheque) ─
     const newBalance   = Math.max(0, Number(existing.balance_amount) - amount);
     const newCollected = Number(existing.payment_collected || 0) + amount;
     const newStatus    = newBalance <= 0 ? "completed" : "remaining";
@@ -478,6 +491,15 @@ export const collectPayment = async (req, res) => {
       balance_after:     newBalance,
       status:            newStatus,
       next_followup_date: newStatus === "remaining" ? nextFollowup : null,
+      snapshot: {
+        bill: {
+          status: existing.status,
+          balance_amount: existing.balance_amount,
+          payment_collected: existing.payment_collected,
+          next_followup_date: existing.next_followup_date,
+        },
+        cheque: null,
+      },
     });
 
     return res.json({ success: true, bill: withCollectionActive(data) });
@@ -499,6 +521,14 @@ export const setCollectionActive = async (req, res) => {
       return res.status(400).json({ success: false, message: "'active' must be true, false, or null" });
     }
 
+    const { data: before, error: beforeErr } = await supabaseAdmin
+      .from("bills")
+      .select("collection_active_manual, collection_active_updated_by, collection_active_updated_at")
+      .eq("id", id)
+      .is("deleted_at", null)
+      .single();
+    if (beforeErr) return res.status(404).json({ success: false, message: "Bill not found" });
+
     const { data, error } = await supabaseAdmin
       .from("bills")
       .update({
@@ -519,6 +549,7 @@ export const setCollectionActive = async (req, res) => {
       remark: active === null
         ? "Reset to automatic (credit-days) logic"
         : `Manually turned collection ${active ? "ON" : "OFF"}`,
+      snapshot: { bill: before, cheque: null },
     });
 
     return res.json({ success: true, bill: withCollectionActive(data) });
@@ -530,6 +561,7 @@ export const setCollectionActive = async (req, res) => {
 // ── PUT /api/bills/:id/cheque/:chequeId/clear ─────────────────────
 // Body: { next_followup_date?, remark? }  (next_followup_date required
 // only if the cheque amount doesn't fully clear the balance)
+// ── PUT /api/bills/:id/cheque/:chequeId/clear ─────────────────────
 export const clearCheque = async (req, res) => {
   try {
     const { id, chequeId } = req.params;
@@ -548,7 +580,7 @@ export const clearCheque = async (req, res) => {
 
     const { data: existing, error: fetchErr } = await supabaseAdmin
       .from("bills")
-      .select("balance_amount, payment_collected")
+      .select("status, balance_amount, payment_collected, next_followup_date")
       .eq("id", id)
       .is("deleted_at", null)
       .single();
@@ -590,6 +622,15 @@ export const clearCheque = async (req, res) => {
       balance_after: newBalance,
       status: newStatus,
       next_followup_date: newStatus === "remaining" ? nextFollowup : null,
+      snapshot: {
+        bill: {
+          status: existing.status,
+          balance_amount: existing.balance_amount,
+          payment_collected: existing.payment_collected,
+          next_followup_date: existing.next_followup_date,
+        },
+        cheque: { id: cheque.id, status: "pending", resolved_by: null, resolved_at: null },
+      },
     });
 
     return res.json({ success: true, bill: withCollectionActive(data) });
@@ -619,6 +660,14 @@ export const bounceCheque = async (req, res) => {
     if (chequeErr || !cheque) return res.status(404).json({ success: false, message: "Cheque record not found" });
     if (cheque.status !== "pending") return res.status(400).json({ success: false, message: "This cheque has already been resolved" });
 
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from("bills")
+      .select("status, next_followup_date")
+      .eq("id", id)
+      .is("deleted_at", null)
+      .single();
+    if (fetchErr) return res.status(404).json({ success: false, message: "Bill not found" });
+
     const { error: cErr } = await supabaseAdmin
       .from("bill_cheques")
       .update({ status: "bounced", resolved_by: userId, resolved_at: nowUTC(), remark })
@@ -640,6 +689,10 @@ export const bounceCheque = async (req, res) => {
 
     logBill(id, "cheque_bounced", userId, {
       remark, status: "remaining", next_followup_date: nextFollowup,
+      snapshot: {
+        bill: { status: existing.status, next_followup_date: existing.next_followup_date },
+        cheque: { id: cheque.id, status: "pending", resolved_by: null, resolved_at: null },
+      },
     });
 
     return res.json({ success: true, bill: withCollectionActive(data) });
@@ -791,6 +844,80 @@ export const deleteBill = async (req, res) => {
     if (delErr) return res.status(400).json({ success: false, message: delErr.message });
 
     return res.json({ success: true, message: "Bill permanently deleted" });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+
+// ── PUT /api/bills/:id/revert-last ────────────────────────────────
+// Restores the bill (and any associated cheque row) to its state just
+// before the most recent revertible action (followup, payment, cheque
+// clear/bounce/record, or collection toggle). "Created/edited/uploaded"
+// actions aren't revertible here — undoing a create is a delete, which
+// already has its own guarded flow.
+export const revertLastAction = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { id: userId } = req.user;
+
+    const { data: lastLog, error: logErr } = await supabaseAdmin
+      .from("bill_logs")
+      .select("*")
+      .eq("bill_id", id)
+      .is("reverted_at", null)
+      .not("snapshot", "is", null)
+      .order("changed_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (logErr) return res.status(400).json({ success: false, message: logErr.message });
+    if (!lastLog) return res.status(400).json({ success: false, message: "Nothing to revert" });
+
+    const snap = lastLog.snapshot || {};
+    const billSnap = snap.bill || {};
+    const chequeSnap = snap.cheque || null;
+
+    if (chequeSnap) {
+      if (chequeSnap.created) {
+        const { error: delErr } = await supabaseAdmin
+          .from("bill_cheques")
+          .delete()
+          .eq("id", chequeSnap.id);
+        if (delErr) return res.status(400).json({ success: false, message: delErr.message });
+      } else {
+        const { error: chErr } = await supabaseAdmin
+          .from("bill_cheques")
+          .update({
+            status: chequeSnap.status,
+            resolved_by: chequeSnap.resolved_by,
+            resolved_at: chequeSnap.resolved_at,
+          })
+          .eq("id", chequeSnap.id);
+        if (chErr) return res.status(400).json({ success: false, message: chErr.message });
+      }
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from("bills")
+      .update({ ...billSnap, updated_by: userId, updated_at: nowUTC() })
+      .eq("id", id)
+      .is("deleted_at", null)
+      .select(WITH_USERS)
+      .single();
+    if (error) return res.status(400).json({ success: false, message: error.message });
+
+    await supabaseAdmin
+      .from("bill_logs")
+      .update({ reverted_at: nowUTC(), reverted_by: userId })
+      .eq("id", lastLog.id);
+
+    logBill(id, "reverted", userId, {
+      remark: `Reverted "${lastLog.action.replace(/_/g, " ")}" logged ${new Date(lastLog.changed_at).toLocaleString("en-IN")}`,
+    });
+
+    return res.json({ success: true, bill: withCollectionActive(data) });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

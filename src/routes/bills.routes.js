@@ -9,7 +9,7 @@ import {
 import {
   uploadBills, getBills, getBillLogs, addFollowup, collectPayment,
   createBill, updateBill, deleteBill,
-  setCollectionActive, clearCheque, bounceCheque,
+  setCollectionActive, clearCheque, bounceCheque, revertLastAction
 } from "../controllers/bills.controller.js";
 
 const router = express.Router();
@@ -25,6 +25,7 @@ router.put("/:id/payment", collectPayment);
 router.put("/:id/collection-toggle", requireBillToggleAccess, setCollectionActive);
 router.put("/:id/cheque/:chequeId/clear", requireBillToggleAccess, clearCheque);
 router.put("/:id/cheque/:chequeId/bounce", requireBillToggleAccess, bounceCheque);
+router.put("/:id/revert-last", requireBillToggleAccess, revertLastAction);
 
 router.post("/upload", requireBillUploadAccess, upload.single("file"), uploadBills);
 router.post("/", requireBillAddAccess, createBill);
