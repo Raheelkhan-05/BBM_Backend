@@ -24,6 +24,40 @@ function toUtcDate(raw) {
   return new Date(hasTz ? raw : `${raw}Z`);
 }
 
+function isBusinessHoursIST(ts) {
+  const d = toUtcDate(ts) || new Date(ts);
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(d);
+  const h = parseInt(parts.find((p) => p.type === "hour").value, 10);
+  const m = parseInt(parts.find((p) => p.type === "minute").value, 10);
+  const hd = h + m / 60;
+  return hd >= 8 && hd < 18;
+}
+
+// `entries` must already be sorted newest → oldest. Mutates each entry
+// with `highlighted: true` if there's a >20min gap before that SAME
+// actor's next-older action, during business hours.
+//
+// Deliberately runs on the FULL, unpaginated list (before any slice/limit
+// is applied) — this is the whole point of moving it server-side. A
+// frontend running this same check only ever sees whatever page(s) have
+// been scrolled into, so a user's true "next older" entry is often not
+// loaded yet, making a real >20min gap silently invisible until (if ever)
+// the user scrolls far enough to load it. Computing it here, against
+// complete per-actor history, means pagination can never hide or
+// fabricate a gap.
+function markIdleGaps(entries) {
+  const prevByActor = new Map(); // actorKey -> the newer entry seen so far
+  entries.forEach((e) => {
+    const key = e.userId || `unattributed:${e.email || e.name}`;
+    const newer = prevByActor.get(key);
+    if (newer && isBusinessHoursIST(newer.timestamp)) {
+      const gapMin = Math.abs(new Date(newer.timestamp) - new Date(e.timestamp)) / 60000;
+      if (gapMin > 20) newer.highlighted = true;
+    }
+    prevByActor.set(key, e);
+  });
+}
+
 function fmtTime(iso) {
   if (!iso) return "";
   const d = toUtcDate(iso);
@@ -1337,11 +1371,14 @@ export async function buildActivityFeed({ limit = 30, offset = 0, employeeId = n
     entries.push(makeEntry(r.updated_by, r.updated_at, "Quotation", rfqsMap.get(rfqId)?.company_name, quotationDiffs.get(r.id)));
   });
 
-  if (employeeId) entries = entries.filter((e) => e.userId === employeeId);
-  entries.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+   if (employeeId) entries = entries.filter((e) => e.userId === employeeId);
+   entries.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
-  const page = entries.slice(offset, offset + limit);
-  return { entries: page, total: entries.length, hasMore: offset + limit < entries.length };
+   // Must run on the full sorted list, before slicing — see markIdleGaps comment.
+   markIdleGaps(entries);
+
+   const page = entries.slice(offset, offset + limit);
+   return { entries: page, total: entries.length, hasMore: offset + limit < entries.length };
 }
 
 // ── All-time, per-employee, WITH full diffs (like buildDailyReportData
