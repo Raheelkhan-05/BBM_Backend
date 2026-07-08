@@ -47,6 +47,28 @@ function leadSnapshot(fields) {
   };
 }
 
+const LEAD_FIELDS = [
+  "company_name","country","state","city","zone","route",
+  "primary_contact_name","primary_designation","primary_phone","primary_email",
+  "secondary_contact_name","secondary_designation","secondary_phone","secondary_email",
+  "nature_of_business","manufacturing_industry","company_website","gst_number","linkedin_profile",
+  "potential_product_category","potential_product_sub_category","potential_product_name",
+  "source","next_action","next_action_date","feedback","status",
+];
+
+function pickDefined(body, keys) {
+  const out = {};
+  for (const k of keys) if (body[k] !== undefined) out[k] = body[k];
+  return out;
+}
+function diffSnapshot(existing, incoming) {
+  const changed = {};
+  for (const k of Object.keys(incoming)) {
+    if (JSON.stringify(existing[k]) !== JSON.stringify(incoming[k])) changed[k] = incoming[k];
+  }
+  return changed;
+}
+
 function logLead(leadId, action, changedBy, snapshot = {}) {
   supabaseAdmin
     .from("lead_logs")
@@ -152,35 +174,43 @@ export const updateLead = async (req, res) => {
   try {
     const { id } = req.params;
     const { id: userId } = req.user;
-    const fields = extractLeadFields(req.body);
-    if (!fields.company_name?.trim())
-      return res.status(400).json({ success: false, message: "Company name is required" });
 
-    // Team model: any team member can update; created_by/updated_by track
-    // who did what rather than gating who's allowed to.
+    const { data: existing, error: fetchError } = await supabaseAdmin
+      .from("leads").select("*").eq("id", id).is("deleted_at", null).single();
+    if (fetchError || !existing)
+      return res.status(404).json({ success: false, message: "Lead not found" });
+
+    // Only fields actually present in the body override the existing row —
+    // anything the caller didn't send keeps its current value.
+    const sentKeys = Object.keys(req.body).filter(k =>
+      Object.prototype.hasOwnProperty.call(existing, k) && req.body[k] !== undefined
+    );
+    const merged = { ...existing };
+    for (const k of sentKeys) merged[k] = req.body[k];
+
+    if (!merged.company_name?.trim())
+      return res.status(400).json({ success: false, message: "Company name is required" });
+    merged.company_name = merged.company_name.trim();
+    if (merged.nature_of_business !== "Manufacturer") merged.manufacturing_industry = null;
+    merged.country = merged.country || "India";
+
+    const fields = extractLeadFields(merged); // now built from the MERGED row, not raw req.body
+
     const { data, error } = await supabaseAdmin
       .from("leads")
-      .update({
-        ...fields,
-        company_name: fields.company_name.trim(),
-        updated_by: userId,
-        updated_at: nowUTC(),
-      })
-      .eq("id", id)
-      .is("deleted_at", null)
-      .select(WITH_CREATOR_UPDATER)
-      .single();
+      .update({ ...fields, company_name: fields.company_name.trim(), updated_by: userId, updated_at: nowUTC() })
+      .eq("id", id).is("deleted_at", null)
+      .select(WITH_CREATOR_UPDATER).single();
     if (error) {
-      if (error.code === "PGRST116")
-        return res.status(404).json({ success: false, message: "Lead not found" });
+      if (error.code === "PGRST116") return res.status(404).json({ success: false, message: "Lead not found" });
       return res.status(400).json({ success: false, message: error.message });
     }
 
+    // Full snapshot of the resulting state, not just what this request touched —
+    // the feed diffs consecutive full snapshots to show what changed.
     logLead(id, "updated", userId, leadSnapshot({ ...fields, company_name: fields.company_name.trim() }));
     return res.json({ success: true, lead: data });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
 };
 
 export const deleteLead = async (req, res) => {
@@ -251,3 +281,5 @@ export const getLeadLogs = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+
+

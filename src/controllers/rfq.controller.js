@@ -38,6 +38,29 @@ async function getSalespersonEmail(userId) {
   return data?.email || null;
 }
 
+
+
+const RFQ_FIELDS = [
+  "lead_id","company_name","product_category","product_sub_category","product_name",
+  "product_description","consumption_per_month","unit","sample_required","sample_description",
+  "sample_received_from_customer","quotation_required","quotation_description",
+  "existing_supplier_brand","notes","target_price","tds_available",
+];
+
+function pickDefined(body, keys) {
+  const out = {};
+  for (const k of keys) if (body[k] !== undefined) out[k] = body[k];
+  return out;
+}
+
+function diffSnapshot(existing, incoming) {
+  const changed = {};
+  for (const k of Object.keys(incoming)) {
+    if (JSON.stringify(existing[k]) !== JSON.stringify(incoming[k])) changed[k] = incoming[k];
+  }
+  return changed;
+}
+
 // ── fire-and-forget log helpers ────────────────────────────────────────────
 function logRFQ(rfqId, action, changedBy, snapshot = {}) {
   supabaseAdmin.from("rfq_logs")
@@ -45,9 +68,13 @@ function logRFQ(rfqId, action, changedBy, snapshot = {}) {
     .then(({ error }) => { if (error) console.error("rfq_logs:", error.message); });
 }
 
-function logFollowup(followupId, action, changedBy, snapshot = {}) {
+// Pass rfq_id explicitly — it's not part of the field-level snapshot,
+// it's how the Activity feed resolves which company/enquiry this
+// follow-up log row belongs to. Previously omitted entirely, so every
+// follow-up log had rfq_id = NULL and rendered as "Unknown company".
+function logFollowup(followupId, rfqId, action, changedBy, snapshot = {}) {
   supabaseAdmin.from("rfq_followup_logs")
-    .insert([{ followup_id: followupId, action, changed_by: changedBy, changed_at: nowUTC(), ...snapshot }])
+    .insert([{ followup_id: followupId, rfq_id: rfqId, action, changed_by: changedBy, changed_at: nowUTC(), ...snapshot }])
     .then(({ error }) => { if (error) console.error("rfq_followup_logs:", error.message); });
 }
 
@@ -223,42 +250,49 @@ export const updateRFQ = async (req, res) => {
   try {
     const { id } = req.params;
     const { id: userId } = req.user;
-    const {
-      lead_id, company_name, product_category, product_sub_category, product_name,
-      product_description, consumption_per_month, unit, sample_required, sample_description,
-      sample_received_from_customer, quotation_required, quotation_description,
-      existing_supplier_brand, notes, target_price, tds_available,
-    } = req.body;
 
-    const { data: existing, error: fetchError } = await supabaseAdmin.from("rfqs")
-      .select("created_by, sample_required, quotation_required").eq("id", id).single();
+    const { data: existing, error: fetchError } = await supabaseAdmin
+      .from("rfqs").select("*").eq("id", id).is("deleted_at", null).single();
     if (fetchError || !existing)
       return res.status(404).json({ success: false, message: "RFQ not found" });
 
-    const [{ data, error }, salespersonEmail] = await Promise.all([
-      supabaseAdmin.from("rfqs").update({
-        lead_id, company_name, product_category, product_sub_category, product_name,
-        product_description, consumption_per_month: consumption_per_month || null, unit,
-        sample_required: sample_required ?? false, sample_description,
-        sample_received_from_customer: sample_received_from_customer ?? false,
-        quotation_required: quotation_required ?? false, quotation_description,
-        existing_supplier_brand, notes: notes || null, target_price: target_price || null,
-        tds_available: tds_available ?? false, updated_by: userId, updated_at: nowUTC(),
-      }).eq("id", id).select().single(),
-      getSalespersonEmail(existing.created_by),
-    ]);
+    const sentKeys = Object.keys(req.body).filter(k =>
+      Object.prototype.hasOwnProperty.call(existing, k) && req.body[k] !== undefined
+    );
+    const merged = { ...existing };
+    for (const k of sentKeys) merged[k] = req.body[k];
+
+    const salespersonEmail = await getSalespersonEmail(existing.created_by);
+
+    const { data, error } = await supabaseAdmin.from("rfqs").update({
+      lead_id: merged.lead_id, company_name: merged.company_name,
+      product_category: merged.product_category, product_sub_category: merged.product_sub_category,
+      product_name: merged.product_name, product_description: merged.product_description,
+      consumption_per_month: merged.consumption_per_month || null, unit: merged.unit,
+      sample_required: merged.sample_required ?? false, sample_description: merged.sample_description,
+      sample_received_from_customer: merged.sample_received_from_customer ?? false,
+      quotation_required: merged.quotation_required ?? false, quotation_description: merged.quotation_description,
+      existing_supplier_brand: merged.existing_supplier_brand, notes: merged.notes || null,
+      target_price: merged.target_price || null, tds_available: merged.tds_available ?? false,
+      updated_by: userId, updated_at: nowUTC(),
+    }).eq("id", id).select().single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });
-    logRFQ(id, "updated", userId, rfqSnapshot(req.body));
 
-    // Sample toggle — awaited + error-checked (see FIXED note at top of file).
+    // Full snapshot of the resulting row — same reasoning as leads.
+    logRFQ(id, "updated", userId, rfqSnapshot(merged));
+
+    // Toggle logic reads the MERGED effective values, so a caller that never
+    // mentions sample_required/quotation_required can't accidentally toggle them off.
+    const sample_required    = merged.sample_required;
+    const quotation_required = merged.quotation_required;
+
     if (sample_required && !existing.sample_required) {
       const { data: s, error: sErr } = await supabaseAdmin.from("samples").insert([{
         rfq_id: id, sample_required: true, sample_status: null, follow_up_date: null, created_by: userId, updated_by: userId,
       }]).select().single();
-      if (sErr) {
-        console.error("updateRFQ: FAILED to create sample row for rfq", id, "-", sErr.message);
-      } else if (s) {
+      if (sErr) console.error("updateRFQ: FAILED to create sample row for rfq", id, "-", sErr.message);
+      else if (s) {
         logSample(s.id, "created", userId, { sample_status: null, follow_up_date: null });
         if (COORDINATOR_EMAIL) sendMailAsync(rfqCreatedCoordinator({ coordinatorEmail: COORDINATOR_EMAIL, rfq: data, salespersonEmail: salespersonEmail || "Unknown" }));
       }
@@ -273,14 +307,12 @@ export const updateRFQ = async (req, res) => {
       }
     }
 
-    // Quotation toggle — awaited + error-checked.
     if (quotation_required && !existing.quotation_required) {
       const { data: q, error: qErr } = await supabaseAdmin.from("quotations").insert([{
         rfq_id: id, quotation_required: true, quotation_status: null, follow_up_date: null, created_by: userId, updated_by: userId,
       }]).select().single();
-      if (qErr) {
-        console.error("updateRFQ: FAILED to create quotation row for rfq", id, "-", qErr.message);
-      } else if (q) {
+      if (qErr) console.error("updateRFQ: FAILED to create quotation row for rfq", id, "-", qErr.message);
+      else if (q) {
         logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: null });
         if (COORDINATOR_EMAIL) sendMailAsync(rfqCreatedCoordinator({ coordinatorEmail: COORDINATOR_EMAIL, rfq: data, salespersonEmail: salespersonEmail || "Unknown" }));
       }
@@ -322,9 +354,14 @@ export const updateRFQToggles = async (req, res) => {
     const quotation_required = !!req.body.quotation_required;
     const tds_available      = !!req.body.tds_available;
 
+    // Full row now (was: "id, sample_required, quotation_required, tds_available")
+    // — needed so the log we write below is a COMPLETE snapshot, not just
+    // these 3 fields. A partial snapshot here is exactly what made every
+    // other field look "cleared" in the Activity feed: the feed diffs full
+    // row-snapshots between consecutive rfq_logs rows for the same RFQ.
     const { data: existing, error: fetchErr } = await supabaseAdmin
       .from("rfqs")
-      .select("id, sample_required, quotation_required, tds_available")
+      .select("*")
       .eq("id", id)
       .is("deleted_at", null)
       .single();
@@ -333,9 +370,6 @@ export const updateRFQToggles = async (req, res) => {
       return res.status(404).json({ success: false, message: `RFQ not found for id ${id}` });
     }
 
-    // Once an enquiry has been converted to an order, its Sample/Quotation
-    // shouldn't be edited out from under that order — point the user at
-    // reverting the order first instead.
     const { data: existingOrder } = await supabaseAdmin
       .from("orders").select("id").eq("rfq_id", id).is("deleted_at", null).maybeSingle();
     if (existingOrder) {
@@ -349,19 +383,15 @@ export const updateRFQToggles = async (req, res) => {
       .from("rfqs")
       .update({ sample_required, quotation_required, tds_available, updated_by: userId, updated_at: nowUTC() })
       .eq("id", id)
-      .select("id, sample_required, quotation_required, tds_available")
+      .select("*")
       .single();
     if (updateErr) return res.status(400).json({ success: false, message: updateErr.message });
 
-    logRFQ(id, "sample_quotation_toggled", userId, { sample_required, quotation_required, tds_available });
+    // Full snapshot: existing row's untouched fields + the 3 toggles just applied.
+    logRFQ(id, "sample_quotation_toggled", userId, rfqSnapshot({ ...existing, sample_required, quotation_required, tds_available }));
 
     const result = { sample: null, quotation: null, sampleRemoved: false, quotationRemoved: false };
 
-    // When Sample/Quotation is newly turned ON here (as opposed to at
-    // enquiry-creation time, where the form's own follow-up date/time gets
-    // passed straight through), there's no date on hand from the request —
-    // seed it from the enquiry's latest follow-up instead, so a
-    // newly-added Sample/Quotation isn't left with no date at all.
     let seedDate = null, seedTime = null;
     if ((sample_required && !existing.sample_required) || (quotation_required && !existing.quotation_required)) {
       const { data: latestFollowup } = await supabaseAdmin
@@ -377,7 +407,6 @@ export const updateRFQToggles = async (req, res) => {
       seedTime = timeMatch ? timeMatch[1] : null;
     }
 
-    // Sample: OFF → ON
     if (sample_required && !existing.sample_required) {
       const { data: s, error: sErr } = await supabaseAdmin
         .from("samples")
@@ -393,9 +422,7 @@ export const updateRFQToggles = async (req, res) => {
         logSample(s.id, "created", userId, { sample_status: null, follow_up_date: seedDate, follow_up_time: seedTime });
         result.sample = s;
       }
-    }
-    // Sample: ON → OFF
-    else if (!sample_required && existing.sample_required) {
+    } else if (!sample_required && existing.sample_required) {
       const { data: sRow } = await supabaseAdmin.from("samples").select("id, sample_status")
         .eq("rfq_id", id).is("deleted_at", null).maybeSingle();
       if (sRow) {
@@ -408,7 +435,6 @@ export const updateRFQToggles = async (req, res) => {
       result.sampleRemoved = true;
     }
 
-    // Quotation: OFF → ON
     if (quotation_required && !existing.quotation_required) {
       const { data: q, error: qErr } = await supabaseAdmin
         .from("quotations")
@@ -424,9 +450,7 @@ export const updateRFQToggles = async (req, res) => {
         logQuotation(q.id, "created", userId, { quotation_status: null, follow_up_date: seedDate, follow_up_time: seedTime });
         result.quotation = q;
       }
-    }
-    // Quotation: ON → OFF
-    else if (!quotation_required && existing.quotation_required) {
+    } else if (!quotation_required && existing.quotation_required) {
       const { data: qRow } = await supabaseAdmin.from("quotations").select("id, quotation_status")
         .eq("rfq_id", id).is("deleted_at", null).maybeSingle();
       if (qRow) {
@@ -591,10 +615,8 @@ export const createFollowup = async (req, res) => {
     }]).select().single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });
-    logFollowup(data.id, "created", userId, followupSnapshot(req.body));
+    logFollowup(data.id, rfqId, "created", userId, followupSnapshot(req.body));
 
-    // A new followup is meaningful activity on the parent RFQ too — reflect it
-    // as the RFQ's last-updated-by so "who last touched this enquiry" stays accurate.
     supabaseAdmin.from("rfqs").update({ updated_by: userId, updated_at: nowUTC() }).eq("id", rfqId)
       .then(({ error: e }) => { if (e) console.error("rfqs.updated_by (via followup):", e.message); });
 
@@ -613,12 +635,12 @@ export const updateFollowup = async (req, res) => {
       contact_type, sample_status_update, quotation_status_update, next_action, notes,
       followup_date: followup_date || null, target_price: target_price || null,
       enquiry_status, remark, updated_at: nowUTC(),
-    }).eq("id", id).select().single();
+    }).eq("id", id).select().single(); // select() returns rfq_id too — use it below
     if (error) {
       if (error.code === "PGRST116") return res.status(404).json({ success: false, message: "Follow-up not found" });
       return res.status(400).json({ success: false, message: error.message });
     }
-    logFollowup(id, "updated", userId, followupSnapshot(req.body));
+    logFollowup(id, data.rfq_id, "updated", userId, followupSnapshot(req.body));
     return res.json({ success: true, followup: data });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
 };
@@ -629,12 +651,12 @@ export const deleteFollowup = async (req, res) => {
     const { id } = req.params;
     const { id: userId } = req.user;
 
-    const { data, error } = await supabaseAdmin.from("rfq_followups").delete().eq("id", id).select("id").single();
+    const { data, error } = await supabaseAdmin.from("rfq_followups").delete().eq("id", id).select("id, rfq_id").single();
     if (error) {
       if (error.code === "PGRST116") return res.status(404).json({ success: false, message: "Follow-up not found" });
       return res.status(400).json({ success: false, message: error.message });
     }
-    logFollowup(id, "deleted", userId);
+    logFollowup(id, data.rfq_id, "deleted", userId);
     return res.json({ success: true, message: "Follow-up deleted" });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
 };
@@ -745,7 +767,7 @@ export const resolveFollowup = async (req, res) => {
     // Log this resolution (previously missing — Won/Lost/Next resolutions
     // never reached rfq_followup_logs, so they were invisible to any
     // activity report or "who did what" history).
-    logFollowup(followup.id, "created", userId, followupSnapshot(payload));
+    logFollowup(followup.id, id, "created", userId, followupSnapshot(payload));
     supabaseAdmin.from("rfqs").update({ updated_by: userId, updated_at: nowUTC() }).eq("id", id)
       .then(({ error: e }) => { if (e) console.error("rfqs.updated_by (via resolve):", e.message); });
 
@@ -754,3 +776,4 @@ export const resolveFollowup = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+
