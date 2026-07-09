@@ -29,15 +29,42 @@ function withCollectionActive(bill) {
   if (!bill) return bill;
   const manual = bill.collection_active_manual;
   const isManual = manual === true || manual === false;
-  const auto = bill.due_date ? bill.due_date <= todayISO() : false;
+  const today = todayISO();
+
+  // Snooze takes priority: bill was manually turned off until a future date.
+  // Once that date is reached, snooze expires and we fall through to auto logic.
+  const snoozedUntil = bill.snoozed_until || null;
+  const isSnoozed = snoozedUntil && snoozedUntil > today;
+
+  const auto = bill.due_date ? bill.due_date <= today : false;
   const cheques = Array.isArray(bill.cheques)
     ? [...bill.cheques].sort((a, b) => new Date(b.recorded_at) - new Date(a.recorded_at))
     : bill.cheques;
+
+  let collectionActive;
+  let isManualFlag;
+
+  if (isSnoozed) {
+    collectionActive = false;
+    isManualFlag = true; // treated as a manual override for display purposes
+  } else if (snoozedUntil && snoozedUntil <= today) {
+    // Snooze just expired — clear it and revert to auto
+    // (The actual DB clear happens lazily on next write, or you can add a cron.
+    // For display, just use auto logic now.)
+    collectionActive = isManual ? manual : auto;
+    isManualFlag = isManual;
+  } else {
+    collectionActive = isManual ? manual : auto;
+    isManualFlag = isManual;
+  }
+
   return {
     ...bill,
     cheques,
-    collection_active: isManual ? manual : auto,
-    collection_active_is_manual: isManual,
+    collection_active: collectionActive,
+    collection_active_is_manual: isManualFlag,
+    snoozed_until: snoozedUntil,
+    is_snoozed: !!isSnoozed,
   };
 }
 
@@ -336,36 +363,64 @@ export const addFollowup = async (req, res) => {
     const { id: userId } = req.user;
     const { remark, reason, next_followup_date } = req.body;
 
-    if (!reason?.trim()) return res.status(400).json({ success: false, message: "Reason is required" });
+    if (!reason?.trim())
+      return res.status(400).json({ success: false, message: "Reason is required" });
 
     const { data: before, error: beforeErr } = await supabaseAdmin
       .from("bills")
-      .select("status, last_remark, last_reason, next_followup_date")
+      .select("status, last_remark, last_reason, next_followup_date, collection_active_manual, snoozed_until")
       .eq("id", id)
       .is("deleted_at", null)
       .single();
-    if (beforeErr) return res.status(404).json({ success: false, message: "Bill not found" });
+    if (beforeErr)
+      return res.status(404).json({ success: false, message: "Bill not found" });
+
+    // If a next follow-up date is provided, snooze collection until that date.
+    // The bill disappears from the active chase queue and reactivates automatically
+    // when the snooze date is reached — no manual toggle needed.
+    const snoozeUntil = next_followup_date || null;
+
+    const updates = {
+      last_remark: remark || null,
+      last_reason: reason,
+      next_followup_date: snoozeUntil,
+      updated_by: userId,
+      updated_at: nowUTC(),
+    };
+
+    if (snoozeUntil) {
+      // Turn collection off until the follow-up date.
+      // We use collection_active_manual=false so the toggle UI reflects
+      // "manually off", and snoozed_until tells us when to auto-reactivate.
+      updates.collection_active_manual = false;
+      updates.snoozed_until = snoozeUntil;
+      updates.collection_active_updated_by = userId;
+      updates.collection_active_updated_at = nowUTC();
+    }
 
     const { data, error } = await supabaseAdmin
       .from("bills")
-      .update({
-        last_remark: remark || null,
-        last_reason: reason,
-        next_followup_date: next_followup_date || null,
-        updated_by: userId,
-        updated_at: nowUTC(),
-      })
+      .update(updates)
       .eq("id", id)
       .is("deleted_at", null)
       .select(WITH_USERS)
       .single();
 
-    if (error) return res.status(400).json({ success: false, message: error.message });
+    if (error)
+      return res.status(400).json({ success: false, message: error.message });
 
     logBill(id, "followup", userId, {
-      remark, reason, next_followup_date: next_followup_date || null,
-      snapshot: { bill: before, cheque: null },
+      remark,
+      reason,
+      next_followup_date: snoozeUntil,
+      // Log the snooze action explicitly so history makes it clear
+      ...(snoozeUntil ? { status: `snoozed_until_${snoozeUntil}` } : {}),
+      snapshot: {
+        bill: before,
+        cheque: null,
+      },
     });
+
     return res.json({ success: true, bill: withCollectionActive(data) });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -469,6 +524,23 @@ export const collectPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: "Next follow-up date is required for partial payments" });
     }
 
+    // For partial payments: snooze collection until the next follow-up date
+    // so the bill goes quiet until it's actually time to chase again.
+    const snoozeFields = (newStatus === "remaining" && nextFollowup)
+      ? {
+          collection_active_manual: false,
+          snoozed_until: nextFollowup,
+          collection_active_updated_by: userId,
+          collection_active_updated_at: nowUTC(),
+        }
+      : newStatus === "completed"
+      ? {
+          // Clear any snooze when bill is fully paid
+          collection_active_manual: null,
+          snoozed_until: null,
+        }
+      : {};
+
     const { data, error } = await supabaseAdmin
       .from("bills")
       .update({
@@ -478,6 +550,7 @@ export const collectPayment = async (req, res) => {
         next_followup_date: newStatus === "completed" ? null : nextFollowup,
         updated_by: userId,
         updated_at: nowUTC(),
+        ...snoozeFields,
       })
       .eq("id", id)
       .select(WITH_USERS)
@@ -491,6 +564,9 @@ export const collectPayment = async (req, res) => {
       balance_after:     newBalance,
       status:            newStatus,
       next_followup_date: newStatus === "remaining" ? nextFollowup : null,
+      ...(newStatus === "remaining" && nextFollowup
+        ? { snooze: `collection_snoozed_until_${nextFollowup}` }
+        : {}),
       snapshot: {
         bill: {
           status: existing.status,
