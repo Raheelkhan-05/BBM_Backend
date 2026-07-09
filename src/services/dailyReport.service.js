@@ -125,7 +125,7 @@ function fmtVal(v) {
     const cleaned = s.replace(timeMatch[0], "").trim();
     s = cleaned ? `${cleaned} (Time: ${timeMatch[1]})` : `Time: ${timeMatch[1]}`;
   }
-  return s.length > 80 ? s.slice(0, 77) + "…" : s;
+  return s;
 }
 
 // ── Generic paginated select (avoids Supabase's implicit 1000-row cap) ──
