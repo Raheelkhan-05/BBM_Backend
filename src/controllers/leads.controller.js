@@ -25,6 +25,8 @@ function leadSnapshot(fields) {
     primary_designation:            fields.primary_designation            ?? null,
     primary_phone:                  fields.primary_phone                  ?? null,
     primary_email:                  fields.primary_email                  ?? null,
+    whatsapp_same_as_mobile:        fields.whatsapp_same_as_mobile         ?? false,   // 
+    whatsapp_number:                fields.whatsapp_number                ?? null,     // 
     secondary_contact_name:         fields.secondary_contact_name         ?? null,
     secondary_designation:          fields.secondary_designation          ?? null,
     secondary_phone:                fields.secondary_phone                ?? null,
@@ -50,6 +52,7 @@ function leadSnapshot(fields) {
 const LEAD_FIELDS = [
   "company_name","country","state","city","zone","route",
   "primary_contact_name","primary_designation","primary_phone","primary_email",
+  "whatsapp_same_as_mobile","whatsapp_number",
   "secondary_contact_name","secondary_designation","secondary_phone","secondary_email",
   "nature_of_business","manufacturing_industry","company_website","gst_number","linkedin_profile",
   "potential_product_category","potential_product_sub_category","potential_product_name",
@@ -88,6 +91,7 @@ function extractLeadFields(body) {
   const {
     company_name, country, state, city, zone, route,
     primary_contact_name, primary_designation, primary_phone, primary_email,
+    whatsapp_same_as_mobile, whatsapp_number,
     secondary_contact_name, secondary_designation, secondary_phone, secondary_email,
     nature_of_business, manufacturing_industry, company_website, gst_number, linkedin_profile,
     potential_product_category, potential_product_sub_category, potential_product_name,
@@ -101,6 +105,8 @@ function extractLeadFields(body) {
     primary_designation:  primary_designation  || null,
     primary_phone:        primary_phone        || null,
     primary_email:        primary_email        || null,
+    whatsapp_same_as_mobile: !!whatsapp_same_as_mobile,                                    // 
+    whatsapp_number: whatsapp_same_as_mobile ? (primary_phone || null) : (whatsapp_number || null), // 
     secondary_contact_name: secondary_contact_name || null,
     secondary_designation:  secondary_designation  || null,
     secondary_phone:        secondary_phone        || null,
@@ -150,11 +156,28 @@ export const createLead = async (req, res) => {
     if (!fields.company_name?.trim())
       return res.status(400).json({ success: false, message: "Company name is required" });
 
+    // in createLead, right before the insert
+    const trimmedName = fields.company_name.trim();
+    const { data: dup, error: dupErr } = await supabaseAdmin
+      .from("leads")
+      .select("id, company_name")
+      .ilike("company_name", trimmedName)
+      .is("deleted_at", null)
+      .maybeSingle();
+    if (dupErr) return res.status(400).json({ success: false, message: dupErr.message });
+    if (dup) {
+      return res.status(409).json({
+        success: false,
+        message: `A lead named "${dup.company_name}" already exists. Please search and select it instead of creating a new one.`,
+        existingLeadId: dup.id,
+      });
+    }
+
     const { data, error } = await supabaseAdmin
       .from("leads")
       .insert([{
         ...fields,
-        company_name: fields.company_name.trim(),
+        company_name: trimmedName,
         created_by: userId,
         updated_by: userId,
       }])
@@ -162,7 +185,7 @@ export const createLead = async (req, res) => {
       .single();
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    logLead(data.id, "created", userId, leadSnapshot({ ...fields, company_name: fields.company_name.trim() }));
+    logLead(data.id, "created", userId, leadSnapshot({ ...fields, company_name: trimmedName }));
     if (salespersonEmail) sendMailAsync(leadCreatedSalesperson({ salespersonEmail, lead: data }));
     return res.status(201).json({ success: true, lead: data });
   } catch (err) {
@@ -193,6 +216,22 @@ export const updateLead = async (req, res) => {
     merged.company_name = merged.company_name.trim();
     if (merged.nature_of_business !== "Manufacturer") merged.manufacturing_industry = null;
     merged.country = merged.country || "India";
+
+    // in updateLead, right after computing `merged.company_name`, before the update call
+    const { data: dup, error: dupErr } = await supabaseAdmin
+      .from("leads")
+      .select("id, company_name")
+      .ilike("company_name", merged.company_name)
+      .neq("id", id)                 // exclude the row being updated
+      .is("deleted_at", null)
+      .maybeSingle();
+    if (dupErr) return res.status(400).json({ success: false, message: dupErr.message });
+    if (dup) {
+      return res.status(409).json({
+        success: false,
+        message: `A different lead named "${dup.company_name}" already exists. Please choose a different name.`,
+      });
+    }
 
     const fields = extractLeadFields(merged); // now built from the MERGED row, not raw req.body
 
@@ -282,4 +321,30 @@ export const getLeadLogs = async (req, res) => {
   }
 };
 
+export const searchLeads = async (req, res) => {
+  try {
+    const { query } = req.query;
+    if (!query?.trim()) {
+      return res.json({ success: true, leads: [] });
+    }
 
+    const { data, error } = await supabaseAdmin
+      .from("leads")
+      .select(
+        "id, company_name, country, state, city, zone, route, nature_of_business, manufacturing_industry, " +
+        "company_website, gst_number, linkedin_profile, primary_contact_name, primary_designation, primary_phone, " +
+        "primary_email, whatsapp_same_as_mobile, whatsapp_number, secondary_contact_name, secondary_designation, " +
+        "secondary_phone, secondary_email, source, next_action, next_action_date, feedback, status, created_at, " +
+        "creator:users!leads_created_by_fkey(email, first_name, last_name)"
+      )
+      .ilike("company_name", `%${query.trim()}%`)
+      .is("deleted_at", null)
+      .order("company_name", { ascending: true })
+      .limit(10);
+
+    if (error) return res.status(400).json({ success: false, message: error.message });
+    return res.json({ success: true, leads: data });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
