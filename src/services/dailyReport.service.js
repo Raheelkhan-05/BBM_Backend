@@ -1371,6 +1371,9 @@ export async function buildActivityFeed({ limit = 30, offset = 0, employeeId = n
     entries.push(makeEntry(r.updated_by, r.updated_at, "Quotation", rfqsMap.get(rfqId)?.company_name, quotationDiffs.get(r.id)));
   });
 
+  const billEntries = await fetchBillActivityEntries();
+  entries = entries.concat(billEntries);
+
    if (employeeId) entries = entries.filter((e) => e.userId === employeeId);
    entries.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
@@ -1403,4 +1406,176 @@ export async function buildAllTimeByEmployee() {
   return Array.from(buckets.values())
     .filter((emp) => emp.entries.length > 0)
     .sort((a, b) => new Date(b.entries[0].timestamp) - new Date(a.entries[0].timestamp));
+}
+
+async function fetchBillActivityEntries() {
+  const [logs, deletions] = await Promise.all([
+    fetchAllPaged("bill_logs", { timeCol: "changed_at" }),
+    fetchAllPaged("bill_deletion_logs", { select: "id, bill_id, deleted_by, deleted_at, snapshot", timeCol: "deleted_at" }),
+  ]);
+
+  const billIds = [...new Set(logs.map((l) => l.bill_id).filter(Boolean))];
+  const billsMap = await fetchByIds(
+    "bills",
+    "id, party_name, bill_no, bill_date, bill_amount, balance_amount, location, mobile_1, mobile_2",
+    billIds
+  );
+
+  const referencedUserIds = [...logs.map((l) => l.changed_by), ...deletions.map((d) => d.deleted_by)];
+  const usersMap = await fetchByIds("users", "id, email, first_name, last_name", referencedUserIds);
+
+  function makeEntry(userId, timestamp, action, party, lines, changes, billId, billNo) {
+    const u = usersMap.get(userId);
+    return {
+      userId: userId || null,
+      email: u?.email || (userId ? `(deleted user ${userId.slice(0, 8)})` : "(no user recorded)"),
+      name: userLabel(u) || (userId ? u?.email || `Unknown (${userId.slice(0, 8)})` : "Unattributed"),
+      timestamp,
+      type: "Bill",
+      billId: billId || null,
+      billNo: billNo || null,
+      company: party || "Unknown party",
+      changeType: billActionLabel(action),
+      changes: changes?.length ? changes : (lines || []).map((l) => ({ label: "", to: l })),
+    };
+  }
+
+  const entries = [];
+  logs.forEach((log) => {
+    const bill = billsMap.get(log.bill_id);
+    const party = bill ? `${bill.party_name} (#${bill.bill_no})` : "Unknown party";
+    if (log.action === "edited") {
+      const changes = parseEditedBillDiff(log.remark).map((c) => ({
+        label: fieldLabel(c.field), from: c.from !== undefined ? fmtVal(c.from) : null, to: c.to !== undefined ? fmtVal(c.to) : null,
+      }));
+      entries.push(makeEntry(log.changed_by, log.changed_at, log.action, party, [], changes, log.bill_id, bill?.bill_no));
+    } else if (log.action === "created" || log.action === "uploaded") {
+      const changes = bill ? billCreateChanges(bill) : [{ label: "Note", to: log.remark || "New bill added" }];
+      entries.push(makeEntry(log.changed_by, log.changed_at, log.action, party, [], changes, log.bill_id, bill?.bill_no));
+    } else {
+      entries.push(makeEntry(log.changed_by, log.changed_at, log.action, party, buildBillLines(log), [], log.bill_id, bill?.bill_no));
+    }
+  });
+  deletions.forEach((d) => {
+    const party = d.snapshot?.bill ? `${d.snapshot.bill.party_name} (#${d.snapshot.bill.bill_no})` : "Unknown party";
+    entries.push(makeEntry(d.deleted_by, d.deleted_at, "deleted", party, ["Bill permanently deleted"], [], d.bill_id, d.snapshot?.bill?.bill_no));
+  });
+
+  return entries;
+}
+
+export async function searchBillParties(query) {
+  const q = (query || "").trim();
+  let req = supabaseAdmin
+    .from("bills")
+    .select("id, party_name, bill_no, status")
+    .is("deleted_at", null)
+    .order("party_name", { ascending: true })
+    .limit(300);
+
+  if (q) req = req.or(`party_name.ilike.%${q}%,bill_no.ilike.%${q}%`);
+
+  const { data, error } = await req;
+  if (error) throw new Error(error.message);
+
+  const seen = new Map();
+  const billNoMatches = [];
+  const qLower = q.toLowerCase();
+
+  (data || []).forEach((b) => {
+    if (!seen.has(b.party_name)) seen.set(b.party_name, { party_name: b.party_name, billCount: 0 });
+    seen.get(b.party_name).billCount += 1;
+
+    // Track bills whose bill_no itself matched — surfaced separately so
+    // the frontend can offer "jump straight to bill #X" instead of just
+    // "browse this bill's party" when someone searches by number.
+    if (q && b.bill_no?.toLowerCase().includes(qLower)) {
+      billNoMatches.push({ id: b.id, bill_no: b.bill_no, party_name: b.party_name, status: b.status });
+    }
+  });
+
+  return {
+    parties: Array.from(seen.values()),
+    billMatches: billNoMatches,
+  };
+}
+
+export async function buildPartyBillTimeline(partyName) {
+  const { data: bills, error } = await supabaseAdmin
+    .from("bills")
+    .select("id, party_name, bill_no, bill_date, bill_amount, balance_amount, status, location, mobile_1, mobile_2, created_by, updated_by")
+    .eq("party_name", partyName)
+    .is("deleted_at", null)
+    .order("bill_date", { ascending: false });
+  if (error) throw new Error(error.message);
+
+  const billIds = bills.map((b) => b.id);
+  const logs = billIds.length
+    ? await supabaseAdmin.from("bill_logs").select("*").in("bill_id", billIds).order("changed_at", { ascending: true }).then((r) => r.data || [])
+    : [];
+
+  const referencedUserIds = [...bills.flatMap((b) => [b.created_by, b.updated_by]), ...logs.map((l) => l.changed_by)];
+  const usersMap = await fetchByIds("users", "id, email, first_name, last_name", referencedUserIds);
+  const who = (id) => (id ? userLabel(usersMap.get(id)) || `Unknown (${id.slice(0, 8)})` : "Unattributed");
+
+  const logsByBill = new Map();
+  logs.forEach((l) => { (logsByBill.get(l.bill_id) || logsByBill.set(l.bill_id, []).get(l.bill_id)).push(l); });
+
+  const billsWithHistory = bills.map((b) => ({
+    ...b,
+    billAmountFmt: fmtINR(b.bill_amount),
+    balanceFmt: fmtINR(b.balance_amount),
+    billDateFmt: fmtDateShort(b.bill_date),
+    createdBy: who(b.created_by),
+    updatedBy: who(b.updated_by),
+    history: (logsByBill.get(b.id) || []).map((l) => ({
+      timestamp: l.changed_at,
+      timeLabel: fmtTime(l.changed_at),
+      action: billActionLabel(l.action),
+      by: who(l.changed_by),
+      lines: l.action === "edited"
+        ? parseEditedBillDiff(l.remark).map((c) => `${fieldLabel(c.field)}: ${fmtVal(c.from)} → ${fmtVal(c.to)}`)
+        : l.action === "created" || l.action === "uploaded"
+          ? billCreateChanges(b).map((c) => `${c.label}: ${c.to}`)
+          : buildBillLines(l),
+    })),
+  }));
+
+  return { partyName, billCount: bills.length, bills: billsWithHistory };
+}
+
+export async function buildSingleBillTimeline(billId) {
+  const { data: bill, error } = await supabaseAdmin.from("bills").select("*").eq("id", billId).single();
+  if (error || !bill) throw new Error("Bill not found");
+
+  const { data: logs } = await supabaseAdmin
+    .from("bill_logs").select("*").eq("bill_id", billId).order("changed_at", { ascending: true });
+
+  const referencedUserIds = [bill.created_by, bill.updated_by, ...(logs || []).map((l) => l.changed_by)];
+  const usersMap = await fetchByIds("users", "id, email, first_name, last_name", referencedUserIds);
+  const who = (id) => (id ? userLabel(usersMap.get(id)) || `Unknown (${id.slice(0, 8)})` : "Unattributed");
+
+  const history = (logs || []).map((l) => ({
+    timestamp: l.changed_at,
+    timeLabel: fmtTime(l.changed_at),
+    action: billActionLabel(l.action),
+    by: who(l.changed_by),
+    lines: l.action === "edited"
+      ? parseEditedBillDiff(l.remark).map((c) => `${fieldLabel(c.field)}: ${fmtVal(c.from)} → ${fmtVal(c.to)}`)
+      : l.action === "created" || l.action === "uploaded"
+        ? billCreateChanges(bill).map((c) => `${c.label}: ${c.to}`)
+        : buildBillLines(l),
+  }));
+
+  return {
+    bill: {
+      ...bill,
+      billAmountFmt: fmtINR(bill.bill_amount),
+      balanceFmt: fmtINR(bill.balance_amount),
+      billDateFmt: fmtDateShort(bill.bill_date),
+      createdBy: who(bill.created_by),
+      updatedBy: who(bill.updated_by),
+    },
+    history,
+  };
 }

@@ -3,7 +3,7 @@ import { Router } from "express";
 import requireAuth from "../middleware/auth.js";
 import {
   getTodayActivity, getStatusBoard, searchCompaniesEndpoint, getCompanyTimeline,
-  getActivityFeed, getAllTimeByEmployee
+  getActivityFeed, getAllTimeByEmployee, searchBillPartiesEndpoint, getPartyBillTimeline, getSingleBillTimeline
 } from "../controllers/adminActivity.controller.js";
 
 const router = Router();
@@ -14,5 +14,9 @@ router.get("/companies", searchCompaniesEndpoint);
 router.get("/companies/:leadId", getCompanyTimeline);
 router.get("/feed", getActivityFeed);
 router.get("/by-employee", getAllTimeByEmployee);
+router.get("/bills/parties", searchBillPartiesEndpoint);
+router.get("/bills/parties/:partyName", getPartyBillTimeline);
+router.get("/bills/:billId", getSingleBillTimeline);
+
 
 export default router;
