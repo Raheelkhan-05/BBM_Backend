@@ -605,6 +605,14 @@ function timeOnly(iso) {
   return full.split(", ").pop() || full;
 }
 
+function productLabel(rfq) {
+  if (!rfq) return null;
+  const parts = [rfq.product_category, rfq.product_sub_category].filter(Boolean);
+  const sub = parts.length ? ` (${parts.join(" / ")})` : "";
+  if (rfq.product_name) return `${rfq.product_name}${sub}`;
+  return parts.length ? parts.join(" / ") : null;
+}
+
 // ── Status report ────────────────────────────────────────────────────
 // "Lead Stage Log" replaces the old "Prospect Status Log" — it's sourced
 // from lead_logs' own next_action/next_action_date/feedback/status
@@ -656,7 +664,11 @@ export async function buildStatusReport() {
     ...[...samplesMap.values()].map((s) => s.rfq_id),
     ...[...quotationsMap.values()].map((q) => q.rfq_id),
   ];
-  const rfqsMap = await fetchByIds("rfqs", "id, company_name", rfqIdsNeeded);
+  const rfqsMap = await fetchByIds(
+    "rfqs",
+    "id, company_name, product_name, product_category, product_sub_category",
+    rfqIdsNeeded
+  );
 
   // User resolution
   const referencedUserIds = [
@@ -698,11 +710,16 @@ export async function buildStatusReport() {
     .map((r) => {
       const { time: embeddedTime, text: cleanedNote } = extractEmbeddedTime(r.notes);
       const status = r.next_action || r.enquiry_status || "—";
+      const rfq = rfqsMap.get(r.rfq_id);
       return {
         timestamp: r.created_at,
         dateLabel: fmtDateShort(r.created_at),
         timeLabel: timeOnly(r.created_at),
-        company: rfqsMap.get(r.rfq_id)?.company_name || "Unknown company",
+        company: rfq?.company_name || "Unknown company",
+        productName: rfq?.product_name || null,
+        productCategory: rfq?.product_category || null,
+        productSubCategory: rfq?.product_sub_category || null,
+        productLabel: productLabel(rfq),
         status,
         statusGroup: status,
         dueDateRaw: r.followup_date || null,
@@ -725,12 +742,17 @@ export async function buildStatusReport() {
   const sampleStatusLog = sampleLogRows
     .map((r) => {
       const rfqId = samplesMap.get(r.sample_id)?.rfq_id;
+      const rfq = rfqsMap.get(rfqId);
       const stage = r.sample_status || "—";
       return {
         timestamp: r.updated_at,
         dateLabel: fmtDateShort(r.updated_at),
         timeLabel: timeOnly(r.updated_at),
-        company: rfqsMap.get(rfqId)?.company_name || "Unknown company",
+        company: rfq?.company_name || "Unknown company",
+        productName: rfq?.product_name || null,
+        productCategory: rfq?.product_category || null,
+        productSubCategory: rfq?.product_sub_category || null,
+        productLabel: productLabel(rfq),
         stage,
         statusGroup: stage,
         dueDateRaw: r.follow_up_date || null,
@@ -747,12 +769,17 @@ export async function buildStatusReport() {
   const quotationStatusLog = quotationLogRows
     .map((r) => {
       const rfqId = quotationsMap.get(r.quotation_id)?.rfq_id;
+      const rfq = rfqsMap.get(rfqId);
       const stage = r.quotation_status || "—";
       return {
         timestamp: r.updated_at,
         dateLabel: fmtDateShort(r.updated_at),
         timeLabel: timeOnly(r.updated_at),
-        company: rfqsMap.get(rfqId)?.company_name || "Unknown company",
+        company: rfq?.company_name || "Unknown company",
+        productName: rfq?.product_name || null,
+        productCategory: rfq?.product_category || null,
+        productSubCategory: rfq?.product_sub_category || null,
+        productLabel: productLabel(rfq),
         stage,
         statusGroup: stage,
         dueDateRaw: r.follow_up_date || null,
