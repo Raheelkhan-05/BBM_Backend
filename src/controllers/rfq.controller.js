@@ -241,7 +241,14 @@ export const createRFQ = async (req, res) => {
       sendMailAsync(rfqCreatedCoordinator({ coordinatorEmail: COORDINATOR_EMAIL, rfq: data, salespersonEmail: salespersonEmail || "Unknown" }));
     }
 
-    return res.status(201).json({ success: true, rfq: data });
+    return res.status(201).json({
+      success: true,
+      rfq: {
+        ...data,
+        samples:    sample_required    && sampleOutcome?.data    ? [sampleOutcome.data]    : [],
+        quotations: quotation_required && quotationOutcome?.data ? [quotationOutcome.data] : [],
+      },
+    });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
 };
 
@@ -826,3 +833,127 @@ export const resolveFollowup = async (req, res) => {
   }
 };
 
+
+// ── PATCH /api/rfqs/:id/mark-dead ──────────────────────────────────────────
+export const markRFQDead = async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { id: userId } = req.user;
+    const { dead_reason } = req.body;
+
+    if (!dead_reason || !dead_reason.trim()) {
+      return res.status(400).json({ success: false, message: "A reason is required to mark this enquiry dead" });
+    }
+
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from("rfqs").select("*").eq("id", id).is("deleted_at", null).single();
+    if (fetchErr || !existing)
+      return res.status(404).json({ success: false, message: "RFQ not found" });
+
+    const { data: existingOrder } = await supabaseAdmin
+      .from("orders").select("id").eq("rfq_id", id).is("deleted_at", null).maybeSingle();
+    if (existingOrder) {
+      return res.status(400).json({ success: false, message: "This enquiry is already converted to an order and can't be marked dead." });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from("rfqs")
+      .update({
+        is_dead: true,
+        dead_reason: dead_reason.trim(),
+        dead_at: nowUTC(),
+        dead_by: userId,
+        updated_by: userId,
+        updated_at: nowUTC(),
+      })
+      .eq("id", id)
+      .select(RFQ_WITH_CREATOR_UPDATER)
+      .single();
+    if (error) return res.status(400).json({ success: false, message: error.message });
+
+    logRFQ(id, "marked_dead", userId, rfqSnapshot({ ...existing, is_dead: true, dead_reason: dead_reason.trim() }));
+    return res.json({ success: true, rfq: data });
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+};
+
+const SUPER_DELETE_EMAIL = "communication@bbmpvtltd.com";
+
+// ── DELETE /api/rfqs/:id/purge ─────────────────────────────────────────────
+// Permanently removes the RFQ and every related row: samples, quotations,
+// rfq_followups, and ALL logs for each of those (sample_logs,
+// quotation_logs, rfq_followup_logs, rfq_logs). Restricted to one account.
+export const purgeRFQ = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { id: userId, email } = req.user;
+
+    if (email !== SUPER_DELETE_EMAIL) {
+      return res.status(403).json({ success: false, message: "Not authorized to permanently delete enquiries" });
+    }
+
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from("rfqs").select("id").eq("id", id).single();
+    if (fetchErr || !existing)
+      return res.status(404).json({ success: false, message: "RFQ not found" });
+
+    const [{ data: sampleRows }, { data: quoteRows }, { data: fupRows }] = await Promise.all([
+      supabaseAdmin.from("samples").select("id").eq("rfq_id", id),
+      supabaseAdmin.from("quotations").select("id").eq("rfq_id", id),
+      supabaseAdmin.from("rfq_followups").select("id").eq("rfq_id", id),
+    ]);
+    const sampleIds = (sampleRows || []).map(r => r.id);
+    const quoteIds  = (quoteRows  || []).map(r => r.id);
+    const fupIds    = (fupRows    || []).map(r => r.id);
+
+    // Delete children first (logs), then the records/rows themselves, then
+    // the rfq's own logs, then the rfq. Any order that respects FK
+    // constraints works — ON DELETE CASCADE on rfq_logs/rfq_followup_logs
+    // handles most of this automatically, but we delete explicitly so the
+    // operation doesn't depend on cascade config being correct everywhere.
+    await Promise.all([
+      sampleIds.length ? supabaseAdmin.from("sample_logs").delete().in("sample_id", sampleIds) : Promise.resolve(),
+      quoteIds.length  ? supabaseAdmin.from("quotation_logs").delete().in("quotation_id", quoteIds) : Promise.resolve(),
+      fupIds.length    ? supabaseAdmin.from("rfq_followup_logs").delete().in("followup_id", fupIds) : Promise.resolve(),
+    ]);
+
+    await Promise.all([
+      supabaseAdmin.from("samples").delete().eq("rfq_id", id),
+      supabaseAdmin.from("quotations").delete().eq("rfq_id", id),
+      supabaseAdmin.from("rfq_followups").delete().eq("rfq_id", id),
+    ]);
+
+    // Also catch any rfq_followup_logs/rfq_logs rows referencing this rfq_id
+    // directly (not just via followup_id) — belt and braces.
+    await Promise.all([
+      supabaseAdmin.from("rfq_followup_logs").delete().eq("rfq_id", id),
+      supabaseAdmin.from("rfq_logs").delete().eq("rfq_id", id),
+    ]);
+
+    // If it had already been converted to an order, drop that too.
+    await supabaseAdmin.from("orders").delete().eq("rfq_id", id);
+
+    const { error } = await supabaseAdmin.from("rfqs").delete().eq("id", id);
+    if (error) return res.status(400).json({ success: false, message: error.message });
+
+    return res.json({ success: true, message: "Enquiry permanently deleted" });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── PATCH /api/rfqs/:id/revive ─────────────────────────────────────────────
+export const reviveRFQ = async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { id: userId } = req.user;
+    const { data, error } = await supabaseAdmin
+      .from("rfqs")
+      .update({ is_dead: false, dead_reason: null, dead_at: null, dead_by: null, updated_by: userId, updated_at: nowUTC() })
+      .eq("id", id).is("deleted_at", null)
+      .select(RFQ_WITH_CREATOR_UPDATER)
+      .single();
+    if (error) return res.status(400).json({ success: false, message: error.message });
+    logRFQ(id, "revived", userId, rfqSnapshot(data));
+    return res.json({ success: true, rfq: data });
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+};

@@ -3,7 +3,8 @@ import authenticate from "../middleware/auth.js";
 import {
   getRFQs, getLeadsForRFQ, createRFQ, updateRFQ, deleteRFQ,
   getFollowups, createFollowup, updateFollowup, deleteFollowup,
-  getDueFollowups, resolveFollowup, updateRFQToggles 
+  getDueFollowups, resolveFollowup, updateRFQToggles,
+  markRFQDead, reviveRFQ, purgeRFQ
 } from "../controllers/rfq.controller.js";
 import roleGuard from "../middleware/roleGuard.js";
 
@@ -28,5 +29,9 @@ router.delete("/followups/:id", deleteFollowup);
 router.use(roleGuard(["Admin", "SalesCoordinator"]));
 router.get("/followups/due", getDueFollowups);
 router.post("/:id/followups/resolve", resolveFollowup);
+
+router.patch("/:id/mark-dead", authenticate, markRFQDead);
+router.patch("/:id/revive", authenticate, reviveRFQ);
+router.delete("/:id/purge", authenticate, purgeRFQ);
 
 export default router;
