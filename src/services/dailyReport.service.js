@@ -1,6 +1,7 @@
 // services/dailyReport.service.js
 
 import { createClient } from "@supabase/supabase-js";
+import { SAMPLE_STAGES, QUOTATION_STAGES, REJECTED_STAGE } from "../constants/stages.js";
 
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
@@ -1604,5 +1605,136 @@ export async function buildSingleBillTimeline(billId) {
       updatedBy: who(bill.updated_by),
     },
     history,
+  };
+}
+
+// ── Stage Matrix — one row per RFQ, first-reached timestamp per sample
+// stage and per quotation stage, side by side. Powers the combined
+// Sample+Quotation matrix PDF export.
+export async function buildStageMatrixReport() {
+  const [rfqsRows, samplesRows, quotationsRows] = await Promise.all([
+    fetchAllPagedSimple(
+      "rfqs",
+      "id, company_name, product_name, product_category, product_sub_category, sample_required, quotation_required, deleted_at"
+    ),
+    fetchAllPagedSimple("samples", "id, rfq_id, deleted_at"),
+    fetchAllPagedSimple("quotations", "id, rfq_id, deleted_at"),
+  ]);
+
+  const aliveRfqs = rfqsRows.filter((r) => !r.deleted_at);
+  const aliveSamples = samplesRows.filter((s) => !s.deleted_at);
+  const aliveQuotations = quotationsRows.filter((q) => !q.deleted_at);
+
+  const sampleByRfq = new Map(aliveSamples.map((s) => [s.rfq_id, s]));
+  const quotationByRfq = new Map(aliveQuotations.map((q) => [q.rfq_id, q]));
+
+  const sampleIds = aliveSamples.map((s) => s.id);
+  const quotationIds = aliveQuotations.map((q) => q.id);
+
+  const [sampleLogs, quotationLogs] = await Promise.all([
+    sampleIds.length
+      ? fetchAllPaged("sample_logs", {
+          select: "id, sample_id, sample_status, updated_at, updated_by",
+          timeCol: "updated_at",
+        })
+      : [],
+    quotationIds.length
+      ? fetchAllPaged("quotation_logs", {
+          select: "id, quotation_id, quotation_status, updated_at, updated_by",
+          timeCol: "updated_at",
+        })
+      : [],
+  ]);
+
+  const referencedUserIds = [
+    ...sampleLogs.map((l) => l.updated_by),
+    ...quotationLogs.map((l) => l.updated_by),
+  ];
+  const usersMap = await fetchByIds("users", "id, email, first_name, last_name", referencedUserIds);
+  const who = (id) => (id ? userLabel(usersMap.get(id)) || `Unknown (${id.slice(0, 8)})` : null);
+
+  // groupId -> logs sorted oldest→newest
+  function groupSorted(logs, idKey) {
+    const groups = new Map();
+    logs.forEach((l) => {
+      const key = l[idKey];
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(l);
+    });
+    groups.forEach((arr) => arr.sort((a, b) => new Date(a.updated_at) - new Date(b.updated_at)));
+    return groups;
+  }
+
+  const sampleLogsBySample = groupSorted(sampleLogs, "sample_id");
+  const quotationLogsByQuotation = groupSorted(quotationLogs, "quotation_id");
+
+  // For a given ordered stage list + a sorted log list, find the FIRST
+  // timestamp each stage was reached, plus a separate Rejected entry.
+  function firstReachedMap(logs, stages, statusField) {
+    const reached = {};
+    let rejected = null;
+    (logs || []).forEach((l) => {
+      const status = l[statusField];
+      if (status === REJECTED_STAGE) {
+        if (!rejected) rejected = { timestamp: l.updated_at, by: who(l.updated_by) };
+        return;
+      }
+      if (stages.includes(status) && !reached[status]) {
+        reached[status] = { timestamp: l.updated_at, by: who(l.updated_by) };
+      }
+    });
+    return { reached, rejected };
+  }
+
+  function enquiryLabel(rfq) {
+    const parts = [rfq.product_category, rfq.product_sub_category].filter(Boolean);
+    const sub = parts.length ? ` (${parts.join(" / ")})` : "";
+    return rfq.product_name ? `${rfq.product_name}${sub}` : parts.join(" / ") || "—";
+  }
+
+  const rows = aliveRfqs
+    .map((rfq) => {
+      const sample = sampleByRfq.get(rfq.id);
+      const quotation = quotationByRfq.get(rfq.id);
+
+      const sampleLogList = sample ? sampleLogsBySample.get(sample.id) || [] : [];
+      const quotationLogList = quotation ? quotationLogsByQuotation.get(quotation.id) || [] : [];
+
+      const { reached: sampleStages, rejected: sampleRejected } = firstReachedMap(
+        sampleLogList, SAMPLE_STAGES, "sample_status"
+      );
+      const { reached: quotationStages, rejected: quotationRejected } = firstReachedMap(
+        quotationLogList, QUOTATION_STAGES, "quotation_status"
+      );
+
+      // every distinct person who touched this enquiry's sample/quotation
+      const touchedBy = new Set([
+        ...Object.values(sampleStages).map((v) => v.by),
+        ...Object.values(quotationStages).map((v) => v.by),
+        sampleRejected?.by,
+        quotationRejected?.by,
+      ].filter(Boolean));
+
+      return {
+        rfqId: rfq.id,
+        company: rfq.company_name || "Unknown company",
+        enquiryDetail: enquiryLabel(rfq),
+        sampleRequired: !!rfq.sample_required,
+        quotationRequired: !!rfq.quotation_required,
+        sampleStages,     // { [stageName]: { timestamp, by } }
+        sampleRejected,   // { timestamp, by } | null
+        quotationStages,
+        quotationRejected,
+        touchedBy: Array.from(touchedBy), // names, for employee filtering
+      };
+    })
+    // Skip enquiries with neither a sample nor a quotation at all
+    .filter((r) => r.sampleRequired || r.quotationRequired)
+    .sort((a, b) => a.company.localeCompare(b.company));
+
+  return {
+    sampleStageNames: SAMPLE_STAGES,
+    quotationStageNames: QUOTATION_STAGES,
+    rows,
   };
 }

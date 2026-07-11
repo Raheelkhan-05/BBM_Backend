@@ -7,6 +7,8 @@ import {
 } from "../config/emailTemplates.js";
 import { syncRfqStatus } from "./rfq-status-sync.js"; // ⬅ NEW
 
+import { SAMPLE_STAGES, REJECTED_STAGE } from "../constants/stages.js";
+
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
@@ -18,22 +20,33 @@ const sendMailAsync = (opts) =>
   sendMail(opts).catch((e) => console.error("Mail error:", e.message));
 
 // add near the top, after sendMailAsync
-function syncSiblingFollowUp(rfqId, table, follow_up_date, follow_up_time) {
+const SIBLING_STATUS_COL = { samples: "sample_status", quotations: "quotation_status" };
+const CLOSED = new Set(["Approved", REJECTED_STAGE]);
+
+function syncSiblingFields(rfqId, table, fields) {
   if (!rfqId) return;
+  const statusCol = SIBLING_STATUS_COL[table];
   supabaseAdmin
     .from(table)
-    .select("id")
+    .select(`id, ${statusCol}`)
     .eq("rfq_id", rfqId)
     .is("deleted_at", null)
     .maybeSingle()
     .then(({ data: sibling, error }) => {
       if (error || !sibling) return;
+      // If the sibling itself is already Approved/Rejected, don't push a
+      // date/time onto it — it doesn't need a follow-up anymore. Priority
+      // and notes still sync regardless, since those stay common either way.
+      const siblingClosed = CLOSED.has(sibling[statusCol]);
+      const patch = siblingClosed
+        ? { priority: fields.priority, notes: fields.notes }
+        : fields;
       supabaseAdmin
         .from(table)
-        .update({ follow_up_date: follow_up_date || null, follow_up_time: follow_up_time || null })
+        .update(patch)
         .eq("id", sibling.id)
         .then(({ error: updErr }) => {
-          if (updErr) console.error(`sync follow-up -> ${table}:`, updErr.message);
+          if (updErr) console.error(`sync -> ${table}:`, updErr.message);
         });
     });
 }
@@ -91,13 +104,18 @@ export const updateSample = async (req, res) => {
     const { id: userId, email: updaterEmail } = req.user;
     const { sample_status, follow_up_date } = req.body;
 
+    const CLOSED_STAGES = new Set(["Approved", REJECTED_STAGE]);
+    if (!CLOSED_STAGES.has(sample_status) && !follow_up_date) {
+      return res.status(400).json({ success: false, message: "Follow-up date is required until Approved/Rejected" });
+    }
+
     const [
       { data: current, error: fetchErr },
       { data: updated, error: updateErr },
     ] = await Promise.all([
       supabaseAdmin
         .from("samples")
-        .select("id, rfq_id, rfqs(id, company_name, product_category, product_sub_category, product_name, sample_description, created_by)")
+        .select("id, rfq_id, sample_status, rfqs(id, company_name, product_category, product_sub_category, product_name, sample_description, created_by)")
         .eq("id", id)
         .single(),
       supabaseAdmin
@@ -123,6 +141,28 @@ export const updateSample = async (req, res) => {
       return res.status(404).json({ success: false, message: "Sample not found" });
     if (updateErr)
       return res.status(400).json({ success: false, message: updateErr.message });
+    
+    
+    const curIdx    = SAMPLE_STAGES.indexOf(current.sample_status);
+    const targetIdx = SAMPLE_STAGES.indexOf(sample_status);
+
+    if (sample_status !== REJECTED_STAGE) {
+      if (targetIdx !== -1 && curIdx !== -1 && targetIdx < curIdx) {
+        return res.status(400).json({ success: false, message: "Cannot move to an earlier stage" });
+      }
+      if (targetIdx > curIdx + 1) {
+        const skipped = [];
+        for (let i = curIdx + 1; i < targetIdx; i++) {
+          skipped.push({
+            sample_id: id,
+            sample_status: SAMPLE_STAGES[i],
+            notes: "Auto-completed (stage skipped)",
+            updated_by: userId,
+          });
+        }
+        if (skipped.length) await supabaseAdmin.from("sample_logs").insert(skipped);
+      }
+    }
 
     const rfq = current.rfqs || {};
 
@@ -170,7 +210,12 @@ export const updateSample = async (req, res) => {
       syncRfqStatus(rfqId, userId).catch((e) =>
         console.error("syncRfqStatus (sample):", e.message)
       );
-      syncSiblingFollowUp(rfqId, "quotations", follow_up_date, req.body.follow_up_time);
+      syncSiblingFields(rfqId, "quotations", {
+        follow_up_date: follow_up_date || null,
+        follow_up_time: req.body.follow_up_time || null,
+        priority:       req.body.priority || null,
+        notes:          req.body.notes || null,
+      });
     }
 
     return res.json({ success: true, sample: updated });

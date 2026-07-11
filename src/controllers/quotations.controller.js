@@ -1,6 +1,7 @@
 // quotations.controller.js
 import { createClient } from "@supabase/supabase-js";
 import { sendMail } from "../config/mailer.js";
+import { SAMPLE_STAGES, REJECTED_STAGE, QUOTATION_STAGES } from "../constants/stages.js";
 import {
   quotationUpdatedCoordinator,
   quotationUpdatedSalesperson,
@@ -17,22 +18,30 @@ const COORDINATOR_EMAIL = process.env.SALES_COORDINATOR_EMAIL;
 const sendMailAsync = (opts) =>
   sendMail(opts).catch((e) => console.error("Mail error:", e.message));
 
-function syncSiblingFollowUp(rfqId, table, follow_up_date, follow_up_time) {
+const SIBLING_STATUS_COL = { samples: "sample_status", quotations: "quotation_status" };
+const CLOSED = new Set(["Approved", REJECTED_STAGE]);
+
+function syncSiblingFields(rfqId, table, fields) {
   if (!rfqId) return;
+  const statusCol = SIBLING_STATUS_COL[table];
   supabaseAdmin
     .from(table)
-    .select("id")
+    .select(`id, ${statusCol}`)
     .eq("rfq_id", rfqId)
     .is("deleted_at", null)
     .maybeSingle()
     .then(({ data: sibling, error }) => {
       if (error || !sibling) return;
+      const siblingClosed = CLOSED.has(sibling[statusCol]);
+      const patch = siblingClosed
+        ? { priority: fields.priority, notes: fields.notes }
+        : fields;
       supabaseAdmin
         .from(table)
-        .update({ follow_up_date: follow_up_date || null, follow_up_time: follow_up_time || null })
+        .update(patch)
         .eq("id", sibling.id)
         .then(({ error: updErr }) => {
-          if (updErr) console.error(`sync follow-up -> ${table}:`, updErr.message);
+          if (updErr) console.error(`sync -> ${table}:`, updErr.message);
         });
     });
 }
@@ -88,13 +97,18 @@ export const updateQuotation = async (req, res) => {
     const { id: userId, email: updaterEmail } = req.user;
     const { quotation_status, follow_up_date } = req.body;
 
+    const CLOSED_STAGES = new Set(["Approved", REJECTED_STAGE]);
+    if (!CLOSED_STAGES.has(quotation_status) && !follow_up_date) {
+      return res.status(400).json({ success: false, message: "Follow-up date is required until Approved/Rejected" });
+    }
+
     const [
       { data: current, error: fetchErr },
       { data: updated, error: updateErr },
     ] = await Promise.all([
       supabaseAdmin
         .from("quotations")
-        .select("id, rfq_id, rfqs(id, company_name, product_category, product_sub_category, product_name, quotation_description, created_by)")
+        .select("id, rfq_id, quotation_status, rfqs(id, company_name, product_category, product_sub_category, product_name, quotation_description, created_by)")
         .eq("id", id)
         .single(),
       supabaseAdmin
@@ -120,6 +134,28 @@ export const updateQuotation = async (req, res) => {
       return res.status(404).json({ success: false, message: "Quotation not found" });
     if (updateErr)
       return res.status(400).json({ success: false, message: updateErr.message });
+
+
+    const curIdx    = QUOTATION_STAGES.indexOf(current.quotation_status);
+    const targetIdx = QUOTATION_STAGES.indexOf(quotation_status);
+
+    if (quotation_status !== REJECTED_STAGE) {
+      if (targetIdx !== -1 && curIdx !== -1 && targetIdx < curIdx) {
+        return res.status(400).json({ success: false, message: "Cannot move to an earlier stage" });
+      }
+      if (targetIdx > curIdx + 1) {
+        const skipped = [];
+        for (let i = curIdx + 1; i < targetIdx; i++) {
+          skipped.push({
+            quotation_id: id,
+            quotation_status: QUOTATION_STAGES[i],
+            notes: "Auto-completed (stage skipped)",
+            updated_by: userId,
+          });
+        }
+        if (skipped.length) await supabaseAdmin.from("quotation_logs").insert(skipped);
+      }
+    }
 
     const rfq = current.rfqs || {};
 
@@ -167,7 +203,12 @@ export const updateQuotation = async (req, res) => {
       syncRfqStatus(rfqId, userId).catch((e) =>
         console.error("syncRfqStatus (quotation):", e.message)
       );
-      syncSiblingFollowUp(rfqId, "samples", follow_up_date, req.body.follow_up_time);
+      syncSiblingFields(rfqId, "samples", {
+        follow_up_date: follow_up_date || null,
+        follow_up_time: req.body.follow_up_time || null,
+        priority:       req.body.priority || null,
+        notes:          req.body.notes || null,
+      });
     }
 
     return res.json({ success: true, quotation: updated });

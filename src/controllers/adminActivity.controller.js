@@ -3,6 +3,7 @@ import {
   buildDailyReportData, buildStatusReport, buildCompanyTimeline, searchCompanies,
   buildActivityFeed, buildAllTimeByEmployee,
   searchBillParties, buildPartyBillTimeline, buildSingleBillTimeline,
+  buildStageMatrixReport
 } from "../services/dailyReport.service.js";
 
 
@@ -14,6 +15,18 @@ function requireAdmin(req, res) {
 //   }
   return true;
 }
+
+// GET /api/admin/activity/stage-matrix
+export const getStageMatrix = async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const data = await buildStageMatrixReport();
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 
 export const searchBillPartiesEndpoint = async (req, res) => {
   if (!requireAdmin(req, res)) return;

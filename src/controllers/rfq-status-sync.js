@@ -1,3 +1,5 @@
+// backend/src/controller/rfq-status-sync
+
 import { createClient } from "@supabase/supabase-js";
 import { deriveNextAction } from "./followup-helpers.js";
 
@@ -20,9 +22,9 @@ export async function syncRfqStatus(rfqId, userId) {
 
   const [{ data: rfq }, { data: sampleRow }, { data: quoteRow }] = await Promise.all([
     supabaseAdmin.from("rfqs").select("id, sample_required, quotation_required").eq("id", rfqId).single(),
-    supabaseAdmin.from("samples").select("result, follow_up_date, follow_up_time")
+    supabaseAdmin.from("samples").select("sample_status, result, follow_up_date, follow_up_time")
       .eq("rfq_id", rfqId).is("deleted_at", null).single(),
-    supabaseAdmin.from("quotations").select("result, follow_up_date, follow_up_time")
+    supabaseAdmin.from("quotations").select("quotation_status, result, follow_up_date, follow_up_time")
       .eq("rfq_id", rfqId).is("deleted_at", null).single(),
   ]);
   if (!rfq) return;
