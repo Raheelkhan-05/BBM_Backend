@@ -11,6 +11,7 @@ import {
   productUpdatedCoordinator,
   productDeletedCoordinator,
 } from "../config/emailTemplates.js";
+import { logAudit } from "../utils/auditLog.js";
 
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
@@ -37,11 +38,10 @@ export const getProducts = async (req, res) => {
   }
 };
 
-// POST /api/products
 export const createProduct = async (req, res) => {
   try {
     const { category, sub_category, product_name, brochure_url } = req.body;
-    const actorEmail = req.user?.email;
+    const actor = req.user;
 
     if (!category?.trim() || !sub_category?.trim() || !product_name?.trim())
       return res.status(400).json({ success: false, message: "All fields are required" });
@@ -59,9 +59,10 @@ export const createProduct = async (req, res) => {
 
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    // Fire-and-forget — don't block response on SMTP
-    if (actorEmail) {
-      sendMailAsync(productCreatedCoordinator({ coordinatorEmail: actorEmail, product: data, actorEmail }));
+    logAudit({ entityType: "product", entityId: data.id, action: "create", actor, after: data });
+
+    if (actor?.email) {
+      sendMailAsync(productCreatedCoordinator({ coordinatorEmail: actor.email, product: data, actorEmail: actor.email }));
     }
 
     return res.status(201).json({ success: true, product: data });
@@ -70,15 +71,20 @@ export const createProduct = async (req, res) => {
   }
 };
 
-// PUT /api/products/:id
 export const updateProduct = async (req, res) => {
   try {
     const { id } = req.params;
     const { category, sub_category, product_name, brochure_url } = req.body;
-    const actorEmail = req.user?.email;
+    const actor = req.user;
 
     if (!category?.trim() || !sub_category?.trim() || !product_name?.trim())
       return res.status(400).json({ success: false, message: "All fields are required" });
+
+    const { data: before } = await supabaseAdmin
+      .from("products")
+      .select("*")
+      .eq("id", id)
+      .single();
 
     const { data, error } = await supabaseAdmin
       .from("products")
@@ -95,9 +101,10 @@ export const updateProduct = async (req, res) => {
 
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    // Fire-and-forget
-    if (actorEmail) {
-      sendMailAsync(productUpdatedCoordinator({ coordinatorEmail: actorEmail, product: data, actorEmail }));
+    logAudit({ entityType: "product", entityId: id, action: "update", actor, before, after: data });
+
+    if (actor?.email) {
+      sendMailAsync(productUpdatedCoordinator({ coordinatorEmail: actor.email, product: data, actorEmail: actor.email }));
     }
 
     return res.json({ success: true, product: data });
@@ -106,19 +113,16 @@ export const updateProduct = async (req, res) => {
   }
 };
 
-// DELETE /api/products/:id
-// OPTIMISED: was SELECT then DELETE (2 calls).
-// Now: DELETE with .select() returns the deleted row in one call.
 export const deleteProduct = async (req, res) => {
   try {
     const { id } = req.params;
-    const actorEmail = req.user?.email;
+    const actor = req.user;
 
     const { data: deleted, error } = await supabaseAdmin
       .from("products")
       .delete()
       .eq("id", id)
-      .select()   // ← returns the deleted row so we can use it in the email
+      .select()
       .single();
 
     if (error) {
@@ -127,9 +131,10 @@ export const deleteProduct = async (req, res) => {
       return res.status(400).json({ success: false, message: error.message });
     }
 
-    // Fire-and-forget
-    if (actorEmail) {
-      sendMailAsync(productDeletedCoordinator({ coordinatorEmail: actorEmail, product: deleted, actorEmail }));
+    logAudit({ entityType: "product", entityId: id, action: "delete", actor, before: deleted });
+
+    if (actor?.email) {
+      sendMailAsync(productDeletedCoordinator({ coordinatorEmail: actor.email, product: deleted, actorEmail: actor.email }));
     }
 
     return res.json({ success: true, message: "Product deleted" });

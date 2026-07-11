@@ -4,6 +4,7 @@
 //   (unique constraint on country+state+city+zone+route required in DB — see note below)
 
 import { createClient } from "@supabase/supabase-js";
+import { logAudit } from "../utils/auditLog.js";
 
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
@@ -25,13 +26,10 @@ export const getRoutes = async (req, res) => {
   }
 };
 
-// POST /api/routes
-// OPTIMISED: upsert replaces the separate duplicate-check SELECT + INSERT (2 calls → 1)
-// Requires a unique constraint in Supabase on (country, state, city, zone, route).
-// Add it via: ALTER TABLE routes ADD CONSTRAINT routes_unique UNIQUE (country, state, city, zone, route);
 export const createRoute = async (req, res) => {
   try {
     const { country, state, city, zone, route } = req.body;
+    const actor = req.user;
 
     if (!city?.trim() || !zone?.trim() || !route?.trim())
       return res.status(400).json({ success: false, message: "City, Zone and Route are required" });
@@ -46,14 +44,13 @@ export const createRoute = async (req, res) => {
 
     const { data, error } = await supabaseAdmin
       .from("routes")
-      .upsert(payload, {
-        onConflict:        "country,state,city,zone,route",
-        ignoreDuplicates:  false, // returns the existing row if duplicate
-      })
+      .upsert(payload, { onConflict: "country,state,city,zone,route", ignoreDuplicates: false })
       .select()
       .single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });
+
+    logAudit({ entityType: "route", entityId: data.id, action: "create", actor, after: data });
 
     return res.status(201).json({ success: true, route: data });
   } catch (err) {
@@ -61,14 +58,20 @@ export const createRoute = async (req, res) => {
   }
 };
 
-// PUT /api/routes/:id — Admin only
 export const updateRoute = async (req, res) => {
   try {
     const { id } = req.params;
     const { country, state, city, zone, route } = req.body;
+    const actor = req.user;
 
     if (!city?.trim() || !zone?.trim() || !route?.trim())
       return res.status(400).json({ success: false, message: "All fields are required" });
+
+    const { data: before } = await supabaseAdmin
+      .from("routes")
+      .select("*")
+      .eq("id", id)
+      .single();
 
     const { data, error } = await supabaseAdmin
       .from("routes")
@@ -84,18 +87,31 @@ export const updateRoute = async (req, res) => {
       .single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });
+
+    logAudit({ entityType: "route", entityId: id, action: "update", actor, before, after: data });
+
     return res.json({ success: true, route: data });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// DELETE /api/routes/:id — Admin only
 export const deleteRoute = async (req, res) => {
   try {
     const { id } = req.params;
-    const { error } = await supabaseAdmin.from("routes").delete().eq("id", id);
+    const actor = req.user;
+
+    const { data: deleted, error } = await supabaseAdmin
+      .from("routes")
+      .delete()
+      .eq("id", id)
+      .select()
+      .single();
+
     if (error) return res.status(400).json({ success: false, message: error.message });
+
+    logAudit({ entityType: "route", entityId: id, action: "delete", actor, before: deleted });
+
     return res.json({ success: true, message: "Route deleted" });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
