@@ -45,13 +45,19 @@ const threadId = {
   customer:     (leadId) => `<lead-${leadId}-cx@bbm.crm>`,
 };
 
-// Returns the three threading headers needed for every email.
-// All messages reference the same root ID → same thread in every client.
-const threadHeaders = (rootMessageId) => ({
-  "Message-ID":  rootMessageId,          // deduplicated by root; override per-send if needed
-  "In-Reply-To": rootMessageId,
-  "References":  rootMessageId,
-});
+// Generates a unique Message-ID for THIS specific email,
+// while In-Reply-To / References point back to the stable thread root.
+// This is the correct RFC 2822 threading pattern:
+//   - Message-ID must be unique per message (or clients dedupe/collapse it)
+//   - In-Reply-To / References carry the thread linkage
+const threadHeaders = (rootMessageId) => {
+  const uniqueId = `<${crypto.randomUUID()}@bbm.crm>`;
+  return {
+    "Message-ID":  uniqueId,        // unique per send — was previously == rootMessageId (bug)
+    "In-Reply-To": rootMessageId,   // links back to the thread root
+    "References":  rootMessageId,   // links back to the thread root
+  };
+};
 
 // Shared subject prefix so the subject line is identical across all
 // messages in a thread (Gmail threads on subject + References).
