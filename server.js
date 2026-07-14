@@ -50,7 +50,7 @@ app.use("/api/orders", ordersRouter);
 app.use("/api/admin/activity", adminActivityRoutes);
 app.use("/api/product-audit-logs", productAuditLogs);
 app.use("/api/route-audit-logs", routeAuditLogs);
-app.use("/api/cron", cronPT)
+app.use("/api/cronPT", cronPT)
 
 app.get("/api/me", auth, (req, res) => {
   res.json({
