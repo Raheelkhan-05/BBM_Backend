@@ -7,7 +7,7 @@ import {
 } from "../services/dailyReport.service.js";
 
 import { syncPendingTaskSnapshots, buildPendingTasksReport } from "../services/pendingTasks.service.js";
-import { pendingTasksDigest } from "../config/emailTemplates.js";
+import { generatePendingTasksPdfBuffer } from "../utils/generatePendingTasksPdfBuffer.js";
 import { sendMailWithRetry } from "../config/mailer.js";
 
 
@@ -28,7 +28,6 @@ function requireCronSecret(req, res) {
   return true;
 }
 
-// GET/POST /api/cron/pending-tasks/sync — morning run
 export const cronSyncPendingTasks = async (req, res) => {
   if (!requireCronSecret(req, res)) return;
   try {
@@ -40,7 +39,6 @@ export const cronSyncPendingTasks = async (req, res) => {
   }
 };
 
-// GET/POST /api/cron/pending-tasks/digest — evening run
 export const cronSendPendingTasksDigest = async (req, res) => {
   if (!requireCronSecret(req, res)) return;
   try {
@@ -49,11 +47,28 @@ export const cronSendPendingTasksDigest = async (req, res) => {
     if (!recipients.length) {
       return res.status(200).json({ success: true, skipped: true, reason: "no recipients configured" });
     }
-    const rows = await buildPendingTasksReport();
-    const tpl = pendingTasksDigest({ recipients, rows });
-    const result = await sendMailWithRetry(tpl);
+
+    const rows = await buildPendingTasksReport(); // reflects every action taken today
+    const pdfBuffer = generatePendingTasksPdfBuffer(rows, null); // null = all employees
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    const result = await sendMailWithRetry({
+      to: recipients,
+      subject: `[BBM] Pending Tasks — ${stamp}`,
+      html: `<p style="font-family:sans-serif;font-size:14px;color:#0f172a">
+               Attached is today's Pending Tasks report (${rows.length} total, ${rows.filter(r => r.statusLabel === "Overdue").length} overdue).
+             </p>`,
+      attachments: [
+        {
+          filename: `Pending_Tasks-${stamp}.pdf`,
+          content: pdfBuffer,
+          contentType: "application/pdf",
+        },
+      ],
+    });
+
     if (!result.success) throw new Error(result.error);
-    return res.json({ success: true, sentTo: recipients, ranAt: new Date().toISOString() });
+    return res.json({ success: true, sentTo: recipients, rowCount: rows.length, ranAt: new Date().toISOString() });
   } catch (err) {
     console.error("[cron digest] failed:", err.message);
     return res.status(500).json({ success: false, message: err.message });
