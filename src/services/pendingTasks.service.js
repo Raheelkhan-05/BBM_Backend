@@ -272,7 +272,7 @@ export async function syncPendingTaskSnapshots() {
         sample_updates: [...snap.sample_updates, ...newSampleEntries],
         quotation_updates: [...snap.quotation_updates, ...newQuotationEntries],
         followup_updates: [...snap.followup_updates, ...newFollowupTextEntries, ...newFollowupEntries.map((f) => ({
-            text: `Follow-up scheduled`, date: f.date, dateRaw: f.dateRaw, time: f.time, at: f.at, by: f.by,
+            text: ``, date: f.date, dateRaw: f.dateRaw, time: f.time, at: f.at, by: f.by,
         }))],
         remarks: [...snap.remarks, ...newRemarks],
         last_synced_at: new Date().toISOString(),
