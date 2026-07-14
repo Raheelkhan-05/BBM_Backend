@@ -905,11 +905,6 @@ export const purgeRFQ = async (req, res) => {
     const quoteIds  = (quoteRows  || []).map(r => r.id);
     const fupIds    = (fupRows    || []).map(r => r.id);
 
-    // Delete children first (logs), then the records/rows themselves, then
-    // the rfq's own logs, then the rfq. Any order that respects FK
-    // constraints works — ON DELETE CASCADE on rfq_logs/rfq_followup_logs
-    // handles most of this automatically, but we delete explicitly so the
-    // operation doesn't depend on cascade config being correct everywhere.
     await Promise.all([
       sampleIds.length ? supabaseAdmin.from("sample_logs").delete().in("sample_id", sampleIds) : Promise.resolve(),
       quoteIds.length  ? supabaseAdmin.from("quotation_logs").delete().in("quotation_id", quoteIds) : Promise.resolve(),
@@ -922,12 +917,18 @@ export const purgeRFQ = async (req, res) => {
       supabaseAdmin.from("rfq_followups").delete().eq("rfq_id", id),
     ]);
 
-    // Also catch any rfq_followup_logs/rfq_logs rows referencing this rfq_id
-    // directly (not just via followup_id) — belt and braces.
     await Promise.all([
       supabaseAdmin.from("rfq_followup_logs").delete().eq("rfq_id", id),
       supabaseAdmin.from("rfq_logs").delete().eq("rfq_id", id),
     ]);
+
+    // pending_task_snapshots.rfq_id -> rfqs(id) has NO ON DELETE CASCADE
+    // (unlike rfq_logs/rfq_followup_logs, which do cascade). Without this,
+    // the final rfqs delete below fails with a foreign-key violation
+    // whenever this RFQ ever had a pending sample/quotation follow-up —
+    // i.e. most real enquiries — leaving everything else already wiped
+    // but the rfqs row itself still present.
+    await supabaseAdmin.from("pending_task_snapshots").delete().eq("rfq_id", id);
 
     // If it had already been converted to an order, drop that too.
     await supabaseAdmin.from("orders").delete().eq("rfq_id", id);
@@ -940,7 +941,6 @@ export const purgeRFQ = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
-
 // ── PATCH /api/rfqs/:id/revive ─────────────────────────────────────────────
 export const reviveRFQ = async (req, res) => {
   try {
