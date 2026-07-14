@@ -39,6 +39,17 @@ export function generatePendingTasksPdfBuffer(rows, selectedUser = null) {
     headStyles: { fillColor: [79, 70, 229], textColor: [255, 255, 255], fontStyle: "bold", fontSize: 8 },
     alternateRowStyles: { fillColor: [248, 250, 252] },
     theme: "grid",
+    tableWidth: 794, // 842pt (A4 landscape) - 24pt margin left - 24pt margin right
+    columnStyles: {
+      0: { cellWidth: 150 }, // Company / Enquiry
+      1: { cellWidth: 55, halign: "center" }, // Status
+      2: { cellWidth: 85 }, // Last Sample Stage
+      3: { cellWidth: 85 }, // Last Quotation Stage
+      4: { cellWidth: 110 }, // New Sample Stage
+      5: { cellWidth: 110 }, // New Quotation Stage
+      6: { cellWidth: 120 }, // New Follow-up
+      7: { cellWidth: 79 },  // Remark
+    },
   });
 
   // arraybuffer → Node Buffer, needed for nodemailer attachments
