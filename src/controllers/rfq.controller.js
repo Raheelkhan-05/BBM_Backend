@@ -957,3 +957,93 @@ export const reviveRFQ = async (req, res) => {
     return res.json({ success: true, rfq: data });
   } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
 };
+
+// ── GET /api/rfqs/:id/activity ─────────────────────────────────────────────
+// Unified activity feed for one enquiry. The EnquiryCard "Activity log"
+// panel previously only showed rfq_followups (via getFollowups), which is
+// why edits made through updateRFQ/updateRFQToggles, mark-dead/revive, and
+// sample/quotation status changes never appeared there — those write to
+// rfq_logs, sample_logs and quotation_logs respectively, none of which the
+// UI was ever fetching. This pulls all four log tables for the given rfq,
+// tags each row with its source `type`, normalizes the timestamp field
+// (some tables use changed_at, others updated_at), and returns one
+// chronologically sorted array.
+export const getRFQActivity = async (req, res) => {
+  try {
+    const id = req.params.id || req.params.rfqId;
+    if (!id) return res.status(400).json({ success: false, message: "Missing rfq id" });
+
+    // Sample/quotation logs are keyed by sample_id/quotation_id, not rfq_id,
+    // so we first need to know which sample/quotation row(s) (including
+    // soft-deleted ones — deletion itself is an activity event) belong to
+    // this rfq.
+    const [{ data: sampleRows }, { data: quoteRows }] = await Promise.all([
+      supabaseAdmin.from("samples").select("id").eq("rfq_id", id),
+      supabaseAdmin.from("quotations").select("id").eq("rfq_id", id),
+    ]);
+    const sampleIds = (sampleRows || []).map(r => r.id);
+    const quoteIds  = (quoteRows  || []).map(r => r.id);
+
+    const [
+      { data: rfqLogs, error: rfqLogsErr },
+      { data: fupLogs, error: fupLogsErr },
+      { data: sampleLogs, error: sampleLogsErr },
+      { data: quoteLogs, error: quoteLogsErr },
+    ] = await Promise.all([
+      supabaseAdmin.from("rfq_logs")
+        .select("*, changer:users!rfq_logs_changed_by_fkey(id, email, first_name, last_name)")
+        .eq("rfq_id", id).order("changed_at", { ascending: false }),
+      supabaseAdmin.from("rfq_followup_logs")
+        .select("*, changer:users!rfq_followup_logs_changed_by_fkey(id, email, first_name, last_name)")
+        .eq("rfq_id", id).order("changed_at", { ascending: false }),
+      sampleIds.length
+        ? supabaseAdmin.from("sample_logs")
+            .select("*, changer:users!sample_logs_updated_by_fkey(id, email, first_name, last_name)")
+            .in("sample_id", sampleIds).order("updated_at", { ascending: false })
+        : Promise.resolve({ data: [], error: null }),
+      quoteIds.length
+        ? supabaseAdmin.from("quotation_logs")
+            .select("*, changer:users!quotation_logs_updated_by_fkey(id, email, first_name, last_name)")
+            .in("quotation_id", quoteIds).order("updated_at", { ascending: false })
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+
+    const firstErr = rfqLogsErr || fupLogsErr || sampleLogsErr || quoteLogsErr;
+    if (firstErr) return res.status(400).json({ success: false, message: firstErr.message });
+
+    const activity = [
+      ...(rfqLogs || []).map(l => ({
+        type: "rfq",
+        action: l.action,
+        at: l.changed_at,
+        by: l.changer,
+        snapshot: l,
+      })),
+      ...(fupLogs || []).map(l => ({
+        type: "followup",
+        action: l.action,
+        at: l.changed_at,
+        by: l.changer,
+        snapshot: l,
+      })),
+      ...(sampleLogs || []).map(l => ({
+        type: "sample",
+        action: l.sample_status || "status_update",
+        at: l.updated_at,
+        by: l.changer,
+        snapshot: l,
+      })),
+      ...(quoteLogs || []).map(l => ({
+        type: "quotation",
+        action: l.quotation_status || "status_update",
+        at: l.updated_at,
+        by: l.changer,
+        snapshot: l,
+      })),
+    ].sort((a, b) => new Date(b.at) - new Date(a.at));
+
+    return res.json({ success: true, activity });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};

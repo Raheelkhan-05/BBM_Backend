@@ -62,7 +62,9 @@ export const getSamples = async (req, res) => {
           id, company_name, product_category, product_sub_category,
           product_name, sample_description, product_description,
           consumption_per_month, unit, existing_supplier_brand,
-          created_by,
+          created_by, updated_by,
+          creator:users!rfqs_created_by_fkey(id, email, first_name, last_name),
+          updater:users!rfqs_updated_by_fkey(id, email, first_name, last_name),
           leads(company_name, primary_contact_name, city, primary_phone)
         ),
         creator:users!samples_created_by_fkey(id, email, first_name, last_name),
@@ -210,6 +212,15 @@ export const updateSample = async (req, res) => {
       syncRfqStatus(rfqId, userId).catch((e) =>
         console.error("syncRfqStatus (sample):", e.message)
       );
+      // Sample updates are enquiry-level activity too — without this, rfqs.updated_by
+      // stays stale (still showing whoever last touched the rfqs row directly),
+      // even though a sample stage change is clearly the most recent thing that
+      // happened on this enquiry.
+      supabaseAdmin.from("rfqs")
+        .update({ updated_by: userId, updated_at: new Date().toISOString() })
+        .eq("id", rfqId)
+        .then(({ error: e }) => { if (e) console.error("rfqs.updated_by (via sample):", e.message); });
+
       syncSiblingFields(rfqId, "quotations", {
         follow_up_date: follow_up_date || null,
         follow_up_time: req.body.follow_up_time || null,
@@ -240,7 +251,10 @@ export const getDueSamples = async (req, res) => {
         rfqs(
           id, company_name, product_category, product_sub_category,
           product_name, sample_description, product_description,
-          consumption_per_month, unit, existing_supplier_brand, created_by,
+          consumption_per_month, unit, existing_supplier_brand,
+          created_by, updated_by,
+          creator:users!rfqs_created_by_fkey(id, email, first_name, last_name),
+          updater:users!rfqs_updated_by_fkey(id, email, first_name, last_name),
           leads(company_name, primary_contact_name, city, primary_phone)
         ),
         creator:users!samples_created_by_fkey(id, email, first_name, last_name),

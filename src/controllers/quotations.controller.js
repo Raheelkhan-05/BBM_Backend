@@ -55,9 +55,11 @@ export const getQuotations = async (req, res) => {
         *,
         rfqs(
           id, company_name, product_category, product_sub_category,
-          product_name, quotation_description, product_description,
+          product_name, sample_description, product_description,
           consumption_per_month, unit, existing_supplier_brand,
-          created_by,
+          created_by, updated_by,
+          creator:users!rfqs_created_by_fkey(id, email, first_name, last_name),
+          updater:users!rfqs_updated_by_fkey(id, email, first_name, last_name),
           leads(company_name, primary_contact_name, city, primary_phone)
         ),
         creator:users!quotations_created_by_fkey(id, email, first_name, last_name),
@@ -203,6 +205,11 @@ export const updateQuotation = async (req, res) => {
       syncRfqStatus(rfqId, userId).catch((e) =>
         console.error("syncRfqStatus (quotation):", e.message)
       );
+      supabaseAdmin.from("rfqs")
+        .update({ updated_by: userId, updated_at: new Date().toISOString() })
+        .eq("id", rfqId)
+        .then(({ error: e }) => { if (e) console.error("rfqs.updated_by (via quotation):", e.message); });
+
       syncSiblingFields(rfqId, "samples", {
         follow_up_date: follow_up_date || null,
         follow_up_time: req.body.follow_up_time || null,
@@ -233,8 +240,11 @@ export const getDueQuotations = async (req, res) => {
         *,
         rfqs(
           id, company_name, product_category, product_sub_category,
-          product_name, quotation_description, product_description,
-          consumption_per_month, unit, existing_supplier_brand, created_by,
+          product_name, sample_description, product_description,
+          consumption_per_month, unit, existing_supplier_brand,
+          created_by, updated_by,
+          creator:users!rfqs_created_by_fkey(id, email, first_name, last_name),
+          updater:users!rfqs_updated_by_fkey(id, email, first_name, last_name),
           leads(company_name, primary_contact_name, city, primary_phone)
         ),
         creator:users!quotations_created_by_fkey(id, email, first_name, last_name),

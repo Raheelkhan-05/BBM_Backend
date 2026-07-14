@@ -4,7 +4,7 @@ import {
   getRFQs, getLeadsForRFQ, createRFQ, updateRFQ, deleteRFQ,
   getFollowups, createFollowup, updateFollowup, deleteFollowup,
   getDueFollowups, resolveFollowup, updateRFQToggles,
-  markRFQDead, reviveRFQ, purgeRFQ
+  markRFQDead, reviveRFQ, purgeRFQ, getRFQActivity
 } from "../controllers/rfq.controller.js";
 import roleGuard from "../middleware/roleGuard.js";
 
@@ -27,6 +27,7 @@ router.put("/followups/:id", updateFollowup);
 router.delete("/followups/:id", deleteFollowup);
 
 router.use(roleGuard(["Admin", "SalesCoordinator"]));
+router.get("/:id/activity", authenticate, getRFQActivity);
 router.get("/followups/due", getDueFollowups);
 router.post("/:id/followups/resolve", resolveFollowup);
 

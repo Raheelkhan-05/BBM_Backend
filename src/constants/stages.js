@@ -1,4 +1,6 @@
 export const SAMPLE_STAGES = [
+  "Product Details to be Inquired",
+  "Primary Product Details Submitted to Client",
   "Sample to be Submitted to Client",
   "Sample to be Collected from Client",
   "Provided by buyer",
