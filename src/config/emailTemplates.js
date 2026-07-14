@@ -720,3 +720,41 @@ export const otpEmail = ({ email, name, token }) => {
 </html>`,
   };
 };
+
+export const pendingTasksDigest = ({ recipients, rows }) => {
+  const overdue = rows.filter((r) => r.statusLabel === "Overdue");
+  const dueToday = rows.filter((r) => r.statusLabel === "Due Today");
+  const stillPending = rows.filter((r) => r.statusLabel === "Pending");
+  const todayStr = new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+
+  const rowsToHtml = (list, color) => list.length
+    ? list.map((r) => `
+      <div style="border:1px solid ${color}30;border-radius:8px;padding:12px 14px;margin-bottom:8px;background:#ffffff">
+        <p style="margin:0 0 4px;font-size:13px;font-weight:700;color:${BRAND.textPrimary}">${r.company} <span style="font-weight:500;color:${BRAND.textMuted}">— Due ${r.dueDateFmt}</span></p>
+        <p style="margin:0 0 4px;font-size:12px;color:${BRAND.textMuted}">${r.enquiryDetail}</p>
+        <p style="margin:0;font-size:11.5px;color:${BRAND.textPrimary};white-space:pre-line">${r.newFollowup !== "—" ? r.newFollowup : "No update logged today"}</p>
+      </div>`).join("")
+    : `<p style="margin:0 0 12px;font-size:12px;color:${BRAND.textLight}">None</p>`;
+
+  return {
+    to: recipients,
+    subject: `[BBM] Pending Tasks Digest — ${todayStr}`,
+    headers: {
+      "Message-ID": `<pending-digest-${Date.now()}@bbm.crm>`,
+    },
+    html: layout(
+      BRAND.rose,
+      "Daily Pending Tasks Digest",
+      "End of Day Summary",
+      `
+      ${sectionLabel(`Overdue (${overdue.length})`)}
+      ${rowsToHtml(overdue, BRAND.rose)}
+      ${divider()}
+      ${sectionLabel(`Due Today (${dueToday.length})`)}
+      ${rowsToHtml(dueToday, "#d97706")}
+      ${divider()}
+      ${sectionLabel(`Still Pending — Upcoming (${stillPending.length})`)}
+      ${rowsToHtml(stillPending, BRAND.accent)}
+    `),
+  };
+};

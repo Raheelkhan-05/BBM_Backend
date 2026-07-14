@@ -6,8 +6,9 @@ import {
   buildStageMatrixReport
 } from "../services/dailyReport.service.js";
 
-import { buildPendingTasksReport } from "../services/pendingTasks.service.js";
-
+import { syncPendingTaskSnapshots, buildPendingTasksReport } from "../services/pendingTasks.service.js";
+import { pendingTasksDigest } from "../config/emailTemplates.js";
+import { sendMailWithRetry } from "../config/mailer.js";
 
 
 function requireAdmin(req, res) {
@@ -17,6 +18,47 @@ function requireAdmin(req, res) {
 //   }
   return true;
 }
+
+function requireCronSecret(req, res) {
+  const secret = req.headers["x-cron-secret"] || req.query.secret;
+  if (!secret || secret !== process.env.CRON_SECRET) {
+    res.status(401).json({ success: false, message: "Unauthorized" });
+    return false;
+  }
+  return true;
+}
+
+// GET/POST /api/cron/pending-tasks/sync — morning run
+export const cronSyncPendingTasks = async (req, res) => {
+  if (!requireCronSecret(req, res)) return;
+  try {
+    await syncPendingTaskSnapshots();
+    return res.json({ success: true, ranAt: new Date().toISOString() });
+  } catch (err) {
+    console.error("[cron sync] failed:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET/POST /api/cron/pending-tasks/digest — evening run
+export const cronSendPendingTasksDigest = async (req, res) => {
+  if (!requireCronSecret(req, res)) return;
+  try {
+    const recipients = (process.env.PENDING_TASKS_DIGEST_TO || "")
+      .split(",").map((s) => s.trim()).filter(Boolean);
+    if (!recipients.length) {
+      return res.status(200).json({ success: true, skipped: true, reason: "no recipients configured" });
+    }
+    const rows = await buildPendingTasksReport();
+    const tpl = pendingTasksDigest({ recipients, rows });
+    const result = await sendMailWithRetry(tpl);
+    if (!result.success) throw new Error(result.error);
+    return res.json({ success: true, sentTo: recipients, ranAt: new Date().toISOString() });
+  } catch (err) {
+    console.error("[cron digest] failed:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
 
 // GET /api/admin/activity/stage-matrix
 export const getStageMatrix = async (req, res) => {

@@ -229,17 +229,17 @@ export async function syncPendingTaskSnapshots() {
     // rfq_followup_logs, then deduped since the sibling sync writes the
     // same date/time onto both tables.
     const followupFromSample = sampleFollowupCandidates
-      .filter((l) => sampleIdToRfq.get(l.sample_id) === snap.rfq_id && new Date(l.updated_at) > cutoff)
-      .map((l) => ({ date: fmtDateShort(l.follow_up_date), time: l.follow_up_time || null, at: l.updated_at, by: who(l.updated_by) }));
+    .filter((l) => sampleIdToRfq.get(l.sample_id) === snap.rfq_id && new Date(l.updated_at) > cutoff)
+    .map((l) => ({ dateRaw: l.follow_up_date, date: fmtDateShort(l.follow_up_date), time: l.follow_up_time || null, at: l.updated_at, by: who(l.updated_by) }));
     const followupFromQuotation = quotationFollowupCandidates
-      .filter((l) => quotationIdToRfq.get(l.quotation_id) === snap.rfq_id && new Date(l.updated_at) > cutoff)
-      .map((l) => ({ date: fmtDateShort(l.follow_up_date), time: l.follow_up_time || null, at: l.updated_at, by: who(l.updated_by) }));
+    .filter((l) => quotationIdToRfq.get(l.quotation_id) === snap.rfq_id && new Date(l.updated_at) > cutoff)
+    .map((l) => ({ dateRaw: l.follow_up_date, date: fmtDateShort(l.follow_up_date), time: l.follow_up_time || null, at: l.updated_at, by: who(l.updated_by) }));
     const followupFromRfq = followupLogs
-      .filter((l) => l.rfq_id === snap.rfq_id && new Date(l.changed_at) > cutoff && l.followup_date)
-      .map((l) => {
+    .filter((l) => l.rfq_id === snap.rfq_id && new Date(l.changed_at) > cutoff && l.followup_date)
+    .map((l) => {
         const { time } = extractEmbeddedTime(l.notes);
-        return { date: fmtDateShort(l.followup_date), time, at: l.changed_at, by: who(l.changed_by) };
-      });
+        return { dateRaw: l.followup_date, date: fmtDateShort(l.followup_date), time, at: l.changed_at, by: who(l.changed_by) };
+    });
     const newFollowupEntries = dedupeByDateTimeWindow([...followupFromSample, ...followupFromQuotation, ...followupFromRfq]);
 
     // ── Remarks — sample notes + quotation notes + followup remark,
@@ -272,7 +272,7 @@ export async function syncPendingTaskSnapshots() {
         sample_updates: [...snap.sample_updates, ...newSampleEntries],
         quotation_updates: [...snap.quotation_updates, ...newQuotationEntries],
         followup_updates: [...snap.followup_updates, ...newFollowupTextEntries, ...newFollowupEntries.map((f) => ({
-          text: `Follow-up scheduled`, date: f.date, time: f.time, at: f.at, by: f.by,
+            text: `Follow-up scheduled`, date: f.date, dateRaw: f.dateRaw, time: f.time, at: f.at, by: f.by,
         }))],
         remarks: [...snap.remarks, ...newRemarks],
         last_synced_at: new Date().toISOString(),
@@ -304,6 +304,7 @@ function enquiryLabel(rfq) {
 
 export async function buildPendingTasksReport({ userId = null } = {}) {
   await syncPendingTaskSnapshots();
+  const today = todayISTDateStr();
 
   const { data: snapshots, error } = await supabaseAdmin
     .from("pending_task_snapshots").select("*").order("due_date", { ascending: true });
@@ -326,19 +327,30 @@ export async function buildPendingTasksReport({ userId = null } = {}) {
     const followupUpdates = [...s.followup_updates].reverse();
     const remarks = [...s.remarks].reverse();
 
-    // Common due date/time: baseline if never changed, else the most
-    // recent follow-up update.
     const latestFollowup = followupUpdates.find((f) => f.date);
-    const dueDateDisplay = latestFollowup?.date || (s.baseline_followup_date ? fmtDateShort(s.baseline_followup_date) : "—");
+    const dueDateRaw = latestFollowup?.dateRaw || s.baseline_followup_date || s.due_date;
+    const dueDateDisplay = latestFollowup?.date || (s.baseline_followup_date ? fmtDateShort(s.baseline_followup_date) : fmtDateShort(s.due_date));
     const dueTimeDisplay = latestFollowup?.time || s.baseline_followup_time || null;
+
+    // Single source of truth for the status label — was previously the
+    // raw DB enum ("pending"/"resolved") in one place and "—" fallbacks
+    // elsewhere, which read as inconsistent. Now: Overdue / Due Today /
+    // Pending / Resolved, always one of these four.
+    let statusLabel = "Resolved";
+    if (s.status === "pending") {
+      statusLabel = dueDateRaw < today ? "Overdue" : dueDateRaw === today ? "Due Today" : "Pending";
+    }
 
     return {
       rfqId: s.rfq_id,
-      dueDate: s.due_date,
-      dueDateFmt: fmtDateShort(s.due_date),
-      status: s.status,
+      dueDate: dueDateRaw,
+      dueDateFmt: dueDateDisplay,
+      status: s.status,           // raw, for filtering logic
+      statusLabel,                 // display label, always consistent
+      isOverdue: s.status === "pending" && dueDateRaw < today,
       company: rfq?.company_name || "Unknown company",
-      enquiryDetail: enquiryLabel(rfq),
+      // createdBy folded into the enquiry detail line instead of its own column
+      enquiryDetail: `${enquiryLabel(rfq)} — ${who(ownerId)}`,
       lastSampleStage: s.baseline_sample_status || "—",
       lastQuotationStage: s.baseline_quotation_status || "—",
       newSampleStage: sampleUpdates.length
@@ -352,16 +364,17 @@ export async function buildPendingTasksReport({ userId = null } = {}) {
         : "—",
       followupDate: dueDateDisplay,
       followupTime: dueTimeDisplay,
-      // Single merged remark column — no more [Sample]/[Quotation] duplicate tags,
-      // since one human note now produces exactly one line here.
       remark: remarks.length
         ? remarks.map((r) => `${r.text} (Updated ${fmtTimeIST(r.at)} by ${r.by})`).join("\n")
         : (s.baseline_remark || "—"),
-      createdBy: who(ownerId),      // ← MUST be this key, not `owner`
-      createdById: ownerId,          // ← MUST be this key, not `ownerId`
-
+      createdBy: who(ownerId),
+      createdById: ownerId,
     };
   }).filter((r) => (userId ? r.createdById === userId : true));
+
+  // Overdue first, then due-today, then future, resolved last
+  const rank = { Overdue: 0, "Due Today": 1, Pending: 2, Resolved: 3 };
+  rows.sort((a, b) => (rank[a.statusLabel] ?? 9) - (rank[b.statusLabel] ?? 9) || a.dueDate.localeCompare(b.dueDate));
 
   return rows;
 }
