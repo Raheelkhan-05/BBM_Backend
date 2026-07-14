@@ -6,6 +6,8 @@ import {
   buildStageMatrixReport
 } from "../services/dailyReport.service.js";
 
+import { buildPendingTasksReport } from "../services/pendingTasks.service.js";
+
 
 
 function requireAdmin(req, res) {
@@ -112,6 +114,16 @@ export const getAllTimeByEmployee = async (req, res) => {
   try {
     const data = await buildAllTimeByEmployee();
     return res.json({ success: true, employees: data });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const getPendingTasks = async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const rows = await buildPendingTasksReport(); // always all rows; frontend filters
+    return res.json({ success: true, rows });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

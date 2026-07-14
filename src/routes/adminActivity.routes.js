@@ -4,7 +4,7 @@ import requireAuth from "../middleware/auth.js";
 import {
   getTodayActivity, getStatusBoard, searchCompaniesEndpoint, getCompanyTimeline,
   getActivityFeed, getAllTimeByEmployee, searchBillPartiesEndpoint, getPartyBillTimeline, getSingleBillTimeline,
-  getStageMatrix
+  getStageMatrix, getPendingTasks
 } from "../controllers/adminActivity.controller.js";
 
 const router = Router();
@@ -19,6 +19,7 @@ router.get("/bills/parties", searchBillPartiesEndpoint);
 router.get("/bills/parties/:partyName", getPartyBillTimeline);
 router.get("/bills/:billId", getSingleBillTimeline);
 router.get("/stage-matrix", getStageMatrix);
+router.get("/pending-tasks", getPendingTasks);
 
 
 
