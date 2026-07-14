@@ -26,6 +26,7 @@ const SAMPLE_NEXT_ACTION = {
 // Maps a quotation_status -> what the salesperson should do next.
 // Keys are the REAL stage names from constants/stages.js.
 const QUOTATION_NEXT_ACTION = {
+  "Quotation Inquired to Customer": "Submit Quotation",
   "Quotation to be Submitted":    "Submit Quotation",
   "Quotation Submitted":          "Collect Quotation Feedback",
   "Under review":                 "Follow up on Review",

@@ -11,6 +11,7 @@ export const SAMPLE_STAGES = [
 ];
 
 export const QUOTATION_STAGES = [
+  "Quotation Inquired to Customer",
   "Quotation to be Submitted",
   "Quotation Submitted",
   "Under review",
