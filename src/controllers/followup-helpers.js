@@ -11,6 +11,7 @@ import { SAMPLE_STAGES, QUOTATION_STAGES, REJECTED_STAGE } from "../constants/st
 // Keys are the REAL stage names from constants/stages.js — do not
 // hardcode strings here without checking SAMPLE_STAGES first.
 const SAMPLE_NEXT_ACTION = {
+  "Sample to be Submitted to Client": "Sample to be Collected from Client",
   "Sample to be Collected from Client": "Provided by buyer",
   "Provided by buyer":            "Submit Sample to Office",
   "Submitted to office":          "Submit Sample to Supplier",

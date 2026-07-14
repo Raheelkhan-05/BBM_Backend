@@ -1,4 +1,5 @@
 export const SAMPLE_STAGES = [
+  "Sample to be Submitted to Client",
   "Sample to be Collected from Client",
   "Provided by buyer",
   "Submitted to office",
