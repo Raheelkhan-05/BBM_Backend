@@ -322,7 +322,10 @@ export async function buildPendingTasksReport({ userId = null } = {}) {
     .order("due_date", { ascending: true });
   if (error) throw new Error(error.message);
 
-  // ...rest unchanged
+  const NOT_STARTED_VALUES = new Set([null, undefined, "Pending"]);
+  function stageLabel(raw) {
+    return NOT_STARTED_VALUES.has(raw) ? "—" : raw;
+  }
 
   const rfqIds = snapshots.map((s) => s.rfq_id);
   const rfqsMap = await fetchByIds(
@@ -365,8 +368,8 @@ export async function buildPendingTasksReport({ userId = null } = {}) {
       company: rfq?.company_name || "Unknown company",
       // createdBy folded into the enquiry detail line instead of its own column
       enquiryDetail: `${enquiryLabel(rfq)} — ${who(ownerId)}`,
-      lastSampleStage: s.baseline_sample_status || "—",
-      lastQuotationStage: s.baseline_quotation_status || "—",
+      lastSampleStage: stageLabel(s.baseline_sample_status),
+      lastQuotationStage: stageLabel(s.baseline_quotation_status),
       newSampleStage: sampleUpdates.length
         ? sampleUpdates.map((u) => `${u.status} (Updated ${fmtTimeIST(u.at)} by ${u.by})`).join("\n")
         : "—",
