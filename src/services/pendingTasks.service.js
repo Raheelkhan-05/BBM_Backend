@@ -322,7 +322,7 @@ export async function buildPendingTasksReport({ userId = null } = {}) {
     .order("due_date", { ascending: true });
   if (error) throw new Error(error.message);
 
-  const NOT_STARTED_VALUES = new Set([null, undefined, "Pending"]);
+  const NOT_STARTED_VALUES = new Set([null, undefined, "Pending", "pending"]);
   function stageLabel(raw) {
     return NOT_STARTED_VALUES.has(raw) ? "—" : raw;
   }
