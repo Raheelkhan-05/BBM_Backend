@@ -9,6 +9,14 @@ const ID_CHUNK = 200;
 function todayISTDateStr() {
   return new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
+
+function istDayBoundsUtc(dateStr) {
+  // dateStr like "2026-07-15" — returns UTC ISO bounds for that IST calendar day
+  const start = new Date(`${dateStr}T00:00:00.000+05:30`).toISOString();
+  const end = new Date(`${dateStr}T23:59:59.999+05:30`).toISOString();
+  return { start, end };
+}
+
 function fmtDateShort(iso) {
   if (!iso) return "";
   const [y, m, d] = iso.split("-");
@@ -305,10 +313,16 @@ function enquiryLabel(rfq) {
 export async function buildPendingTasksReport({ userId = null } = {}) {
   await syncPendingTaskSnapshots();
   const today = todayISTDateStr();
+  const { start: todayStart, end: todayEnd } = istDayBoundsUtc(today);
 
   const { data: snapshots, error } = await supabaseAdmin
-    .from("pending_task_snapshots").select("*").order("due_date", { ascending: true });
+    .from("pending_task_snapshots")
+    .select("*")
+    .or(`status.eq.pending,and(status.eq.resolved,resolved_at.gte.${todayStart},resolved_at.lte.${todayEnd})`)
+    .order("due_date", { ascending: true });
   if (error) throw new Error(error.message);
+
+  // ...rest unchanged
 
   const rfqIds = snapshots.map((s) => s.rfq_id);
   const rfqsMap = await fetchByIds(
