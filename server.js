@@ -23,6 +23,8 @@ import routeAuditLogs from "./src/routes/routeAuditLogs.routes.js";
 import adminActivityRoutes from "./src/routes/adminActivity.routes.js";
 import { getProductAuditLogs } from "./src/controllers/productAuditLogs.controller.js";
 import cronPT from "./src/routes/cronPT.routes.js";
+import posRouter from "./src/routes/pos.routes.js";
+
 
 dotenv.config();
 
@@ -50,7 +52,8 @@ app.use("/api/orders", ordersRouter);
 app.use("/api/admin/activity", adminActivityRoutes);
 app.use("/api/product-audit-logs", productAuditLogs);
 app.use("/api/route-audit-logs", routeAuditLogs);
-app.use("/api/cronPT", cronPT)
+app.use("/api/cronPT", cronPT);
+app.use("/api/pos", posRouter);
 
 app.get("/api/me", auth, (req, res) => {
   res.json({
