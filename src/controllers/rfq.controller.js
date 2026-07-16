@@ -1047,3 +1047,76 @@ export const getRFQActivity = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// ── PATCH /api/rfqs/:id/details ────────────────────────────────────────────
+// Fill-in-the-blanks edit surface: lets a user complete fields that were
+// left empty when the enquiry was first created, plus tds_available
+// (always editable). Deliberately narrow like updateRFQToggles — does NOT
+// touch sample_required/quotation_required, and will NOT overwrite any
+// field that already has a non-empty value server-side, even if the
+// caller sends one. This guards against a stale client clobbering a value
+// someone else filled in between page load and save.
+const DETAILS_FILLABLE_FIELDS = [
+  "product_category", "product_sub_category", "product_name", "product_description",
+  "consumption_per_month", "unit", "target_price", "existing_supplier_brand",
+  "sample_description", "quotation_description",
+];
+
+function isEmptyVal(v) {
+  return v === null || v === undefined || v === "";
+}
+
+export const updateRFQDetails = async (req, res) => {
+  try {
+    const id = req.params.id || req.params.rfqId;
+    const { id: userId } = req.user;
+    if (!id) {
+      console.error("updateRFQDetails: no rfq id in route params —", JSON.stringify(req.params));
+      return res.status(400).json({ success: false, message: "Missing rfq id in request" });
+    }
+
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from("rfqs")
+      .select("*")
+      .eq("id", id)
+      .is("deleted_at", null)
+      .single();
+    if (fetchErr || !existing) {
+      console.error("updateRFQDetails: rfq not found for id", id, "-", fetchErr?.message);
+      return res.status(404).json({ success: false, message: `RFQ not found for id ${id}` });
+    }
+
+    const update = {};
+    for (const key of DETAILS_FILLABLE_FIELDS) {
+      if (req.body[key] === undefined) continue;
+      // Only fill in if currently empty AND the incoming value is non-empty.
+      if (isEmptyVal(existing[key]) && !isEmptyVal(req.body[key])) {
+        update[key] = req.body[key];
+      }
+    }
+    if (req.body.tds_available !== undefined) {
+      update.tds_available = !!req.body.tds_available;
+    }
+
+    if (Object.keys(update).length === 0) {
+      return res.json({ success: true, rfq: existing, message: "Nothing to update" });
+    }
+
+    update.updated_by = userId;
+    update.updated_at = nowUTC();
+
+    const { data: updatedRfq, error: updateErr } = await supabaseAdmin
+      .from("rfqs")
+      .update(update)
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (updateErr) return res.status(400).json({ success: false, message: updateErr.message });
+
+    logRFQ(id, "details_filled", userId, rfqSnapshot(updatedRfq));
+
+    return res.json({ success: true, rfq: updatedRfq });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};

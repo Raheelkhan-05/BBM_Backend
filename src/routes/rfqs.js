@@ -4,7 +4,8 @@ import {
   getRFQs, getLeadsForRFQ, createRFQ, updateRFQ, deleteRFQ,
   getFollowups, createFollowup, updateFollowup, deleteFollowup,
   getDueFollowups, resolveFollowup, updateRFQToggles,
-  markRFQDead, reviveRFQ, purgeRFQ, getRFQActivity
+  markRFQDead, reviveRFQ, purgeRFQ, getRFQActivity,
+  updateRFQDetails
 } from "../controllers/rfq.controller.js";
 import roleGuard from "../middleware/roleGuard.js";
 
@@ -18,6 +19,7 @@ router.post("/", createRFQ);
 router.put("/:id", updateRFQ);
 router.delete("/:id", deleteRFQ);
 router.patch("/:id/toggles", updateRFQToggles);
+router.patch("/:id/details", updateRFQDetails);
 
 
 // Follow-ups
