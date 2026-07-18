@@ -7,27 +7,33 @@ const VIEW_ALLOWED = new Set([
   "account@bbmpvtltd.com",
   "communication@bbmpvtltd.com",
   "jay@bbmpvtltd.com",
+  "info@bbmpvtltd.com",
+  
 ]);
 
 const UPLOAD_ALLOWED = new Set([
   "communication@bbmpvtltd.com",
   "account@bbmpvtltd.com",
+  "info@bbmpvtltd.com",
 ]);
 
 const ADD_ALLOWED = new Set([
   "communication@bbmpvtltd.com",
   "account@bbmpvtltd.com",
+  "info@bbmpvtltd.com",
 ]);
 
 const EDIT_DELETE_ALLOWED = new Set([
   "communication@bbmpvtltd.com",
   "account@bbmpvtltd.com",
+  "info@bbmpvtltd.com",
 ]);
 
 // Manual override of Tracking Active, recording deliveries, cancelling a PO.
 const TOGGLE_ALLOWED = new Set([
   "account@bbmpvtltd.com",
   "communication@bbmpvtltd.com",
+  "info@bbmpvtltd.com",
 ]);
 
 function norm(email) {
