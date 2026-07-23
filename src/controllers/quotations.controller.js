@@ -104,6 +104,8 @@ export const updateQuotation = async (req, res) => {
       return res.status(400).json({ success: false, message: "Follow-up date is required until Approved/Rejected" });
     }
 
+    const derivedResult = CLOSED_STAGES.has(quotation_status) ? quotation_status : null;
+
     const [
       { data: current, error: fetchErr },
       { data: updated, error: updateErr },
@@ -117,7 +119,7 @@ export const updateQuotation = async (req, res) => {
         .from("quotations")
         .update({
           quotation_status,
-          result: req.body.result || null,
+          result: derivedResult,
           priority: req.body.priority || null,
           description:    req.body.description    || null,
           reject_reason:  req.body.reject_reason  || null,
@@ -165,7 +167,7 @@ export const updateQuotation = async (req, res) => {
       supabaseAdmin.from("quotation_logs").insert([{
         quotation_id: id,
         quotation_status,
-        result: req.body.result || null,
+        result: derivedResult,
         priority: req.body.priority || null,
         description:    req.body.description    || null,
         reject_reason:  req.body.reject_reason  || null,

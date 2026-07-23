@@ -20,30 +20,36 @@ function encodeTimeInNotes(time, notes) {
 export async function syncRfqStatus(rfqId, userId) {
   if (!rfqId) return;
 
-  const [{ data: rfq }, { data: sampleRow }, { data: quoteRow }] = await Promise.all([
-    supabaseAdmin.from("rfqs").select("id, sample_required, quotation_required").eq("id", rfqId).single(),
+  const [{ data: rfq }, { data: sampleRow }, { data: quoteRow }, { data: existingOrder }] = await Promise.all([
+    supabaseAdmin.from("rfqs").select("id, is_dead, sample_required, quotation_required").eq("id", rfqId).single(),
     supabaseAdmin.from("samples").select("sample_status, result, follow_up_date, follow_up_time")
       .eq("rfq_id", rfqId).is("deleted_at", null).single(),
     supabaseAdmin.from("quotations").select("quotation_status, result, follow_up_date, follow_up_time")
       .eq("rfq_id", rfqId).is("deleted_at", null).single(),
+    supabaseAdmin.from("orders").select("id").eq("rfq_id", rfqId).is("deleted_at", null).maybeSingle(),
   ]);
   if (!rfq) return;
 
-  const nextAction = deriveNextAction(rfq, sampleRow || null, quoteRow || null);
-
-  // Pick whichever record (sample or quotation) is nearest, and carry
-  // BOTH its date and its time — not just the date.
-  const candidates = [
-    sampleRow?.follow_up_date ? { date: sampleRow.follow_up_date, time: sampleRow.follow_up_time || null } : null,
-    quoteRow?.follow_up_date  ? { date: quoteRow.follow_up_date,  time: quoteRow.follow_up_time  || null } : null,
-  ].filter(Boolean).sort((a, b) => a.date.localeCompare(b.date));
-
-  const nearest = candidates[0] || null;
-
+  // Always keep updated_by/updated_at current — that's harmless — but don't
+  // manufacture a new "open" follow-up for an RFQ that's dead or already an order.
   await supabaseAdmin
     .from("rfqs")
     .update({ updated_by: userId, updated_at: nowUTC() })
     .eq("id", rfqId);
+
+  if (rfq.is_dead || existingOrder) return;
+
+  const nextAction = deriveNextAction(rfq, sampleRow || null, quoteRow || null);
+
+  const CLOSED = new Set(["Approved", "Rejected"]);
+  const candidates = [
+    sampleRow?.follow_up_date && !CLOSED.has(sampleRow.sample_status)
+      ? { date: sampleRow.follow_up_date, time: sampleRow.follow_up_time || null } : null,
+    quoteRow?.follow_up_date && !CLOSED.has(quoteRow.quotation_status)
+      ? { date: quoteRow.follow_up_date, time: quoteRow.follow_up_time || null } : null,
+  ].filter(Boolean).sort((a, b) => a.date.localeCompare(b.date));
+
+  const nearest = candidates[0] || null;
 
   if (nearest) {
     const { error } = await supabaseAdmin.from("rfq_followups").insert([{

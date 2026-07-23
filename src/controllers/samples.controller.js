@@ -111,6 +111,8 @@ export const updateSample = async (req, res) => {
       return res.status(400).json({ success: false, message: "Follow-up date is required until Approved/Rejected" });
     }
 
+    const derivedResult = CLOSED_STAGES.has(sample_status) ? sample_status : null;
+
     const [
       { data: current, error: fetchErr },
       { data: updated, error: updateErr },
@@ -124,7 +126,7 @@ export const updateSample = async (req, res) => {
         .from("samples")
         .update({
           sample_status,
-          result: req.body.result || null,
+          result: derivedResult,
           priority: req.body.priority || null,
           follow_up_date: follow_up_date || null,
           description:    req.body.description    || null,
@@ -172,7 +174,7 @@ export const updateSample = async (req, res) => {
       supabaseAdmin.from("sample_logs").insert([{
         sample_id: id,
         sample_status,
-        result: req.body.result || null,
+        result: derivedResult,
         priority: req.body.priority || null,
         description:    req.body.description    || null,
         reject_reason:  req.body.reject_reason  || null,
