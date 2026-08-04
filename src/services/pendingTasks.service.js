@@ -332,7 +332,7 @@ export async function buildPendingTasksReport({ userId = null } = {}) {
 
   const rfqIds = snapshots.map((s) => s.rfq_id);
   const rfqsMap = await fetchByIds(
-    "rfqs", "id, company_name, product_name, product_category, product_sub_category, created_by, is_dead", rfqIds
+    "rfqs", "id, company_name, product_name, product_category, product_sub_category, created_by, is_dead, dead_at", rfqIds
   );
   const ownerIds = rfqIds.map((id) => rfqsMap.get(id)?.created_by);
   const usersMap = await fetchByIds("users", "id, email, first_name, last_name", ownerIds);
@@ -356,6 +356,7 @@ export async function buildPendingTasksReport({ userId = null } = {}) {
     // raw DB enum ("pending"/"resolved") in one place and "—" fallbacks
     // elsewhere, which read as inconsistent. Now: Overdue / Due Today /
     // Pending / Resolved, always one of these four.
+    // Give it its own status label instead of falling into "Resolved"
     let statusLabel = "Resolved";
     if (s.status === "pending") {
       statusLabel = dueDateRaw < today ? "Overdue" : dueDateRaw === today ? "Due Today" : "Pending";
@@ -373,6 +374,8 @@ export async function buildPendingTasksReport({ userId = null } = {}) {
       company: rfq?.company_name || "Unknown company",
       // createdBy folded into the enquiry detail line instead of its own column
       enquiryDetail: `${enquiryLabel(rfq)} — ${who(ownerId)}`,
+      isDead: !!rfq?.is_dead,
+      deadAt: rfq?.dead_at || null,
       lastSampleStage: stageLabel(s.baseline_sample_status),
       lastQuotationStage: stageLabel(s.baseline_quotation_status),
       newSampleStage: sampleUpdates.length
@@ -392,7 +395,14 @@ export async function buildPendingTasksReport({ userId = null } = {}) {
       createdBy: who(ownerId),
       createdById: ownerId,
     };
-  }).filter((r) => (userId ? r.createdById === userId : true));
+  }).filter((r) => {
+    if (r.isDead) {
+      // only keep a dead enquiry's row if it was actually marked dead today
+      return r.deadAt && r.deadAt >= todayStart && r.deadAt <= todayEnd;
+    }
+    return true;
+  })
+  .filter((r) => (userId ? r.createdById === userId : true));
 
   // Overdue first, then due-today, then future, resolved last
   const rank = { Overdue: 0, "Due Today": 1, Pending: 2, Resolved: 3 };
