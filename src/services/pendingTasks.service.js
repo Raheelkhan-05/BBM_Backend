@@ -122,7 +122,7 @@ export async function syncPendingTaskSnapshots() {
   const [rfqs, samples, quotations] = await Promise.all([
     fetchAllPagedSimple(
       "rfqs",
-      "id, company_name, product_name, product_category, product_sub_category, sample_required, quotation_required, sample_description, quotation_description, notes, created_by, deleted_at"
+      "id, company_name, product_name, product_category, product_sub_category, sample_required, quotation_required, sample_description, quotation_description, notes, created_by, is_dead, deleted_at"
     ),
     fetchAllPagedSimple("samples", "id, rfq_id, sample_status, follow_up_date, follow_up_time, notes, updated_by, deleted_at"),
     fetchAllPagedSimple("quotations", "id, rfq_id, quotation_status, follow_up_date, follow_up_time, notes, updated_by, deleted_at"),
@@ -140,6 +140,7 @@ export async function syncPendingTaskSnapshots() {
   const nowIso = new Date().toISOString();
   const toInsert = [];
   for (const [rfqId, rfq] of rfqById) {
+    if (rfq.is_dead) continue;   
     const sample = sampleByRfq.get(rfqId);
     const quotation = quotationByRfq.get(rfqId);
     const sampleDue = rfq.sample_required && sample?.follow_up_date && sample.follow_up_date <= today && !isTerminal(sample.sample_status);
@@ -294,12 +295,13 @@ export async function syncPendingTaskSnapshots() {
       await supabaseAdmin.from("pending_task_snapshots").update({ last_synced_at: new Date().toISOString() }).eq("id", snap.id);
     }
 
-    const stillSampleDue = sample?.follow_up_date && sample.follow_up_date <= today && !isTerminal(sample.sample_status);
-    const stillQuotationDue = quotation?.follow_up_date && quotation.follow_up_date <= today && !isTerminal(quotation.quotation_status);
+    const stillSampleDue = !rfq?.is_dead && sample?.follow_up_date && sample.follow_up_date <= today && !isTerminal(sample.sample_status);
+    const stillQuotationDue = !rfq?.is_dead && quotation?.follow_up_date && quotation.follow_up_date <= today && !isTerminal(quotation.quotation_status);
     if (!stillSampleDue && !stillQuotationDue) {
       await supabaseAdmin.from("pending_task_snapshots")
         .update({ status: "resolved", resolved_at: new Date().toISOString() }).eq("id", snap.id);
     }
+
   }
 }
 
@@ -329,7 +331,7 @@ export async function buildPendingTasksReport({ userId = null } = {}) {
 
   const rfqIds = snapshots.map((s) => s.rfq_id);
   const rfqsMap = await fetchByIds(
-    "rfqs", "id, company_name, product_name, product_category, product_sub_category, created_by", rfqIds
+    "rfqs", "id, company_name, product_name, product_category, product_sub_category, created_by, is_dead", rfqIds
   );
   const ownerIds = rfqIds.map((id) => rfqsMap.get(id)?.created_by);
   const usersMap = await fetchByIds("users", "id, email, first_name, last_name", ownerIds);
@@ -356,6 +358,8 @@ export async function buildPendingTasksReport({ userId = null } = {}) {
     let statusLabel = "Resolved";
     if (s.status === "pending") {
       statusLabel = dueDateRaw < today ? "Overdue" : dueDateRaw === today ? "Due Today" : "Pending";
+    } else if (rfq?.is_dead) {
+      statusLabel = "Dead";
     }
 
     return {
