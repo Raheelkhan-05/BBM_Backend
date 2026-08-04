@@ -221,6 +221,7 @@ export async function syncPendingTaskSnapshots() {
   const quotationIdToRfq = new Map(quotations.map((q) => [q.id, q.rfq_id]));
 
   for (const snap of openNow) {
+    const rfq = rfqById.get(snap.rfq_id);
     const sample = sampleByRfq.get(snap.rfq_id);
     const quotation = quotationByRfq.get(snap.rfq_id);
     const cutoff = new Date(snap.last_synced_at);
