@@ -33,7 +33,7 @@ router.get("/:id/activity", authenticate, getRFQActivity);
 router.get("/followups/due", getDueFollowups);
 router.post("/:id/followups/resolve", resolveFollowup);
 
-router.patch("/:id/mark-dead", authenticate, markRFQDead);
+router.patch("/:id/mark-dead", markRFQDead);
 router.patch("/:id/revive", authenticate, reviveRFQ);
 router.delete("/:id/purge", authenticate, purgeRFQ);
 
