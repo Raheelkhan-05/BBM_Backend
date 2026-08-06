@@ -285,7 +285,10 @@ export async function buildBillDuesDigest() {
         mobile: b.mobile_1 || b.mobile_2 || "—",
         balanceFmt: fmtINR(b.balance_amount),
         lastReason: b.last_reason || "—",
-        pendingCheque: cheque ? `${fmtINR(cheque.amount)} — ${cheque.bank_name || "—"} (dated ${fmtDateShort(cheque.cheque_date)})` : null,
+        // Cheque number is included whenever recorded, alongside amount / bank / date.
+        pendingCheque: cheque
+          ? `${fmtINR(cheque.amount)}${cheque.cheque_no ? ` (Cheque #${cheque.cheque_no})` : ""} — ${cheque.bank_name || "Bank not recorded"}, dated ${fmtDateShort(cheque.cheque_date) || "—"}`
+          : null,
         dueDateRaw: b.next_followup_date || null,
         dueDateFmt: fmtDateShort(b.next_followup_date) || "Not scheduled",
         bucket: dueBucket(b.next_followup_date, today),
@@ -391,82 +394,205 @@ export async function buildRepeatOrderTasksByUser() {
 
 // ══════════════════════════════════════════════════════════════════════
 // HTML rendering
+//
+// Built as an HTML *email*, not a web page: layout uses nested tables
+// (not flexbox/grid, which Outlook's Word rendering engine ignores),
+// every style is inline, and the palette is deliberately muted — soft
+// tinted badges rather than solid saturated chips, a light neutral page
+// background behind a single white content card, and quiet gray
+// label/value rows instead of "Label: X | Label: Y" strings.
 // ══════════════════════════════════════════════════════════════════════
-const BUCKET_COLORS = { Overdue: "#dc2626", "Due Today": "#d97706", Upcoming: "#16a34a", "No Date": "#64748b" };
+const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+
+const COLORS = {
+  pageBg: "#f4f4f5",
+  card: "#ffffff",
+  border: "#e5e7eb",
+  hairline: "#f0f0f1",
+  text: "#111827",
+  textMuted: "#6b7280",
+  label: "#9ca3af",
+};
+
+// Soft tinted background + matching text color, rather than a solid
+// saturated fill — reads as a status label, not an alert.
+const BUCKET_STYLES = {
+  Overdue: { bg: "#fdecec", text: "#b3261e" },
+  "Due Today": { bg: "#fdf3e2", text: "#9a6700" },
+  Upcoming: { bg: "#e9f6ed", text: "#1e7a34" },
+  "No Date": { bg: "#f3f4f6", text: "#6b7280" },
+};
+
+function esc(v) {
+  return v === undefined || v === null ? "" : String(v);
+}
+
 function bucketBadge(bucket) {
-  const color = BUCKET_COLORS[bucket] || "#64748b";
-  return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;color:#fff;background:${color}">${bucket}</span>`;
+  const s = BUCKET_STYLES[bucket] || BUCKET_STYLES["No Date"];
+  return `<span style="display:inline-block;padding:3px 10px;border-radius:100px;font-family:${FONT};font-size:11px;font-weight:600;line-height:1.4;color:${s.text};background:${s.bg};white-space:nowrap;">${esc(bucket)}</span>`;
 }
+
 function sectionHeader(title, count) {
-  return `<h2 style="font-family:sans-serif;font-size:16px;color:#1e293b;border-bottom:2px solid #e2e8f0;padding-bottom:6px;margin:28px 0 12px">${title} (${count})</h2>`;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:28px 0 10px;">
+    <tr>
+      <td style="border-bottom:1px solid ${COLORS.border};padding-bottom:8px;font-family:${FONT};font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:${COLORS.textMuted};">
+        ${esc(title)} <span style="color:${COLORS.label};font-weight:500;">${count}</span>
+      </td>
+    </tr>
+  </table>`;
 }
-function cardWrap(title, bucket, bodyHtml) {
-  return `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:12px 14px;margin-bottom:10px;font-family:sans-serif;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-      <strong style="font-size:14px;color:#0f172a;">${title}</strong>${bucketBadge(bucket)}
-    </div>
-    <div style="font-size:12.5px;color:#475569;line-height:1.6;">${bodyHtml}</div></div>`;
+
+// One label/value line inside a card. Returns "" for empty values so
+// callers can freely include optional rows (e.g. sample/quotation only
+// when required) without leaving blank gaps.
+function metaRow(label, value) {
+  if (value === undefined || value === null || value === "" || value === "—") return "";
+  return `<tr>
+    <td style="padding:2px 12px 2px 0;font-family:${FONT};font-size:12.5px;color:${COLORS.label};white-space:nowrap;vertical-align:top;">${esc(label)}</td>
+    <td style="padding:2px 0;font-family:${FONT};font-size:12.5px;color:#374151;vertical-align:top;">${esc(value)}</td>
+  </tr>`;
+}
+
+function cardWrap(title, bucket, metaRowsHtml, remark) {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ${COLORS.border};border-radius:8px;margin-bottom:10px;">
+    <tr>
+      <td style="padding:14px 16px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td style="padding-bottom:8px;font-family:${FONT};font-size:14.5px;font-weight:600;color:${COLORS.text};vertical-align:middle;">${esc(title)}</td>
+            <td align="right" style="padding-bottom:8px;vertical-align:middle;white-space:nowrap;">${bucketBadge(bucket)}</td>
+          </tr>
+        </table>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${metaRowsHtml}</table>
+        ${remark && remark !== "—" ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid ${COLORS.hairline};font-family:${FONT};font-size:12.5px;line-height:1.5;color:${COLORS.textMuted};">${esc(remark)}</div>` : ""}
+      </td>
+    </tr>
+  </table>`;
 }
 
 function leadTaskCard(t) {
-  return cardWrap(t.company, t.bucket,
-    `Location: ${t.location} &nbsp;|&nbsp; Status: ${t.status}<br/>
-     Contact: ${t.contactName} (${t.contactDesignation}) — ${t.contactPhone} — ${t.contactEmail}<br/>
-     Next Action: ${t.nextAction} &nbsp;|&nbsp; Follow-up: ${t.dueDateFmt}<br/>
-     Remark: ${t.remark}`);
+  const contact = [t.contactName, t.contactDesignation !== "—" ? t.contactDesignation : null].filter(Boolean).join(" · ");
+  const rows = [
+    metaRow("Location", t.location),
+    metaRow("Status", t.status),
+    metaRow("Contact", contact),
+    metaRow("Phone", t.contactPhone),
+    metaRow("Email", t.contactEmail),
+    metaRow("Next action", t.nextAction),
+    metaRow("Follow-up", t.dueDateFmt),
+  ].join("");
+  return cardWrap(t.company, t.bucket, rows, t.remark);
 }
+
 function enquiryTaskCard(t) {
   if (t.isPlain) {
-    return cardWrap(t.company, t.bucket,
-      `Product: ${t.product} &nbsp;|&nbsp; Follow-up: ${t.dueDateFmt}<br/>
-       Status: ${t.status}<br/>
-       Remark: ${t.remark}`);
+    const rows = [
+      metaRow("Product", t.product),
+      metaRow("Status", t.status),
+      metaRow("Follow-up", t.dueDateFmt),
+    ].join("");
+    return cardWrap(t.company, t.bucket, rows, t.remark);
   }
-  return cardWrap(t.company, t.bucket,
-    `Product: ${t.product} &nbsp;|&nbsp; Follow-up: ${t.dueDateFmt}<br/>
-     ${t.sampleRequired ? `Sample: ${t.sampleStatus} — ${t.sampleRemark} (Follow-up: ${t.sampleFollowUp})<br/>` : ""}
-     ${t.quotationRequired ? `Quotation: ${t.quotationStatus} — ${t.quotationRemark} (Follow-up: ${t.quotationFollowUp})<br/>` : ""}`);
+
+  const rows = [
+    metaRow("Product", t.product),
+    metaRow("Follow-up", t.dueDateFmt),
+    t.sampleRequired ? metaRow("Sample", `${t.sampleStatus} · next follow-up ${t.sampleFollowUp}`) : "",
+    t.quotationRequired ? metaRow("Quotation", `${t.quotationStatus} · next follow-up ${t.quotationFollowUp}`) : "",
+  ].join("");
+
+  const remarkParts = [];
+  if (t.sampleRequired && t.sampleRemark !== "—") remarkParts.push(`Sample: ${t.sampleRemark}`);
+  if (t.quotationRequired && t.quotationRemark !== "—") remarkParts.push(`Quotation: ${t.quotationRemark}`);
+
+  return cardWrap(t.company, t.bucket, rows, remarkParts.join(" · "));
 }
+
 function repeatOrderTaskCard(t) {
-  return cardWrap(t.party, t.bucket,
-    `Location: ${t.location} &nbsp;|&nbsp; Status: ${t.status} &nbsp;|&nbsp; Follow-up: ${t.dueDateFmt}<br/>
-     GSTIN: ${t.gstin} &nbsp;|&nbsp; Mobile: ${t.mobile}<br/>
-     Lifetime Value: ${t.lifetimeValueFmt} (${t.billsCount} bills) &nbsp;|&nbsp; Last Purchase: ${t.lastPurchaseFmt} &nbsp;|&nbsp; Last Salesman: ${t.lastSalesMan}<br/>
-     Remark: ${t.lastRemark}`);
+  const rows = [
+    metaRow("Location", t.location),
+    metaRow("Status", t.status),
+    metaRow("Follow-up", t.dueDateFmt),
+    metaRow("GSTIN", t.gstin),
+    metaRow("Mobile", t.mobile),
+    metaRow("Lifetime value", `${t.lifetimeValueFmt} · ${t.billsCount} bill${t.billsCount === 1 ? "" : "s"}`),
+    metaRow("Last purchase", `${t.lastPurchaseFmt} · ${t.lastSalesMan}`),
+  ].join("");
+  return cardWrap(t.party, t.bucket, rows, t.lastRemark);
 }
+
 function billTaskCard(t) {
-  return cardWrap(`${t.party} (#${t.billNo})`, t.bucket,
-    `Bill Date: ${t.billDateFmt} &nbsp;|&nbsp; Balance: ${t.balanceFmt} &nbsp;|&nbsp; Follow-up: ${t.dueDateFmt}<br/>
-     Location: ${t.location} &nbsp;|&nbsp; Mobile: ${t.mobile}<br/>
-     ${t.pendingCheque ? `Pending Cheque: ${t.pendingCheque}<br/>` : ""}
-     Last Remark: ${t.lastReason}`);
+  const rows = [
+    metaRow("Bill date", t.billDateFmt),
+    metaRow("Balance", t.balanceFmt),
+    metaRow("Follow-up", t.dueDateFmt),
+    metaRow("Location", t.location),
+    metaRow("Mobile", t.mobile),
+    metaRow("Pending cheque", t.pendingCheque),
+  ].join("");
+  return cardWrap(`${t.party} · #${t.billNo}`, t.bucket, rows, t.lastReason);
 }
+
 function poTaskCard(t) {
-  return cardWrap(`${t.party} (${t.orderNo})`, t.bucket,
-    `Order Date: ${t.orderDateFmt} &nbsp;|&nbsp; Expected Delivery: ${t.expectedDeliveryFmt} &nbsp;|&nbsp; Follow-up: ${t.dueDateFmt}<br/>
-     Status: ${t.status} &nbsp;|&nbsp; Pending Qty: ${t.pendingQty} &nbsp;|&nbsp; Pending Amount: ${t.pendingAmountFmt}<br/>
-     Location: ${t.location} &nbsp;|&nbsp; Mobile: ${t.mobile}<br/>
-     Last Remark: ${t.lastRemark}`);
+  const rows = [
+    metaRow("Order date", t.orderDateFmt),
+    metaRow("Expected delivery", t.expectedDeliveryFmt),
+    metaRow("Follow-up", t.dueDateFmt),
+    metaRow("Status", t.status),
+    metaRow("Pending qty", t.pendingQty),
+    metaRow("Pending amount", t.pendingAmountFmt),
+    metaRow("Location", t.location),
+    metaRow("Mobile", t.mobile),
+  ].join("");
+  return cardWrap(`${t.party} · ${t.orderNo}`, t.bucket, rows, t.lastRemark);
+}
+
+// Shared outer shell: light neutral page background, single white card,
+// thin hairlines instead of heavy borders/shadows, small-caps brand mark
+// in the header, quiet footer disclaimer. Kept deliberately plain.
+function emailShell(bodyHtml) {
+  return `<div style="background:${COLORS.pageBg};padding:24px 12px;font-family:${FONT};">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:0 auto;background:${COLORS.card};border:1px solid ${COLORS.border};border-radius:10px;">
+      <tr>
+        <td style="padding:20px 24px;border-bottom:1px solid ${COLORS.border};">
+          <span style="font-family:${FONT};font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:${COLORS.text};">BBM</span>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:20px 24px 4px;">
+          ${bodyHtml}
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:16px 24px 20px;border-top:1px solid ${COLORS.border};">
+          <span style="font-family:${FONT};font-size:11.5px;color:${COLORS.label};">This is an automated daily summary. Please do not reply to this email.</span>
+        </td>
+      </tr>
+    </table>
+  </div>`;
 }
 
 function buildUserDigestHtml(userName, { leadTasks = [], enquiryTasks = [], repeatOrderTasks = [] }) {
   const total = leadTasks.length + enquiryTasks.length + repeatOrderTasks.length;
-  let html = `<div style="max-width:640px;margin:0 auto;">
-    <p style="font-family:sans-serif;font-size:14px;color:#0f172a;">Good morning ${userName}, here's your pending task list for today (${total} total).</p>`;
-  if (leadTasks.length) { html += sectionHeader("Leads — Pending Follow-up", leadTasks.length); html += leadTasks.map(leadTaskCard).join(""); }
-  if (enquiryTasks.length) { html += sectionHeader("Enquiries — Sample / Quotation", enquiryTasks.length); html += enquiryTasks.map(enquiryTaskCard).join(""); }
-  if (repeatOrderTasks.length) { html += sectionHeader("Repeat Orders — Pending Follow-up", repeatOrderTasks.length); html += repeatOrderTasks.map(repeatOrderTaskCard).join(""); }
-  html += `</div>`;
-  return html;
+  let body = `<p style="margin:0 0 4px;font-family:${FONT};font-size:14.5px;font-weight:600;color:${COLORS.text};">Good morning, ${esc(userName)}</p>
+    <p style="margin:0;font-family:${FONT};font-size:13px;color:${COLORS.textMuted};">${total} pending task${total === 1 ? "" : "s"} today.</p>`;
+
+  if (leadTasks.length) { body += sectionHeader("Leads — Pending Follow-up", leadTasks.length); body += leadTasks.map(leadTaskCard).join(""); }
+  if (enquiryTasks.length) { body += sectionHeader("Enquiries — Sample / Quotation", enquiryTasks.length); body += enquiryTasks.map(enquiryTaskCard).join(""); }
+  if (repeatOrderTasks.length) { body += sectionHeader("Repeat Orders — Pending Follow-up", repeatOrderTasks.length); body += repeatOrderTasks.map(repeatOrderTaskCard).join(""); }
+
+  return emailShell(body);
 }
+
 function buildAdminDigestHtml({ billTasks = [], poTasks = [] }) {
   const total = billTasks.length + poTasks.length;
-  let html = `<div style="max-width:640px;margin:0 auto;">
-    <p style="font-family:sans-serif;font-size:14px;color:#0f172a;">Today's outstanding Bill &amp; PO dues (${total} total).</p>`;
-  if (billTasks.length) { html += sectionHeader("Bill Dues", billTasks.length); html += billTasks.map(billTaskCard).join(""); }
-  if (poTasks.length) { html += sectionHeader("Purchase Order Dues", poTasks.length); html += poTasks.map(poTaskCard).join(""); }
-  html += `</div>`;
-  return html;
+  let body = `<p style="margin:0 0 4px;font-family:${FONT};font-size:14.5px;font-weight:600;color:${COLORS.text};">Bill &amp; PO Dues</p>
+    <p style="margin:0;font-family:${FONT};font-size:13px;color:${COLORS.textMuted};">${total} outstanding item${total === 1 ? "" : "s"} today.</p>`;
+
+  if (billTasks.length) { body += sectionHeader("Bill Dues", billTasks.length); body += billTasks.map(billTaskCard).join(""); }
+  if (poTasks.length) { body += sectionHeader("Purchase Order Dues", poTasks.length); body += poTasks.map(poTaskCard).join(""); }
+
+  return emailShell(body);
 }
 
 // ══════════════════════════════════════════════════════════════════════
