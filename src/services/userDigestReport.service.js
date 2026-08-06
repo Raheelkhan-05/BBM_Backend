@@ -415,7 +415,6 @@ export async function buildRepeatOrderTasksByUser() {
 const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 const COLORS = {
-  pageBg: "#f4f4f5",
   card: "#ffffff",
   border: "#e5e7eb",
   hairline: "#f0f0f1",
@@ -503,7 +502,7 @@ function quickOverview(sections) {
 
 // ── Compact per-task rows (one line each) ───────────────────────────
 function leadTaskCard(t) {
-  return compactRow(t.company, t.dueDateFmt, t.bucket, false);
+  return compactRow(t.company, t.dueDateFmt, t.bucket);
 }
 
 function enquiryTaskCard(t) {
@@ -531,15 +530,40 @@ function poTaskCard(t) {
   return compactRow(t.party, `${t.orderNo} · ${t.dueDateFmt}`, t.bucket);
 }
 
-// Shared outer shell: light neutral page background, single white card,
-// thin hairlines instead of heavy borders/shadows, small-caps brand mark
-// in the header, quiet footer disclaimer. Kept deliberately plain.
+// Placeholder — replace with the hosted URL of the actual BBM logo (or
+// swap this whole <img> block for a cid: reference if you'd rather send
+// it as an inline attachment via sendMailWithRetry). Needs to be a
+// publicly reachable https URL for most mail clients to render it.
+// const LOGO_URL = "https://YOUR_HOSTED_LOGO_URL/logo.png";
+const LOGO_URL = "https://lh3.googleusercontent.com/a-/ALV-UjUYV3SgWfaGuDePY-q3KfFTizDwqESGMBzqmhzijZukuKv847VzC_T6xxGjkeKvk47xp2mWrcWcpaFItZfvjTM3JaID4dsRUdNaRTf0QjG9pYUSS7nkvI7RwgZuij5PNOgWNa4sRq4FHKnsArrP4_wxiqHr3DjpoSN9-8Qpt0ocDuKXjYAY9GXzhX5ZLg1_9XauZfPjmFgW7y90pQoojSJmCcve4SxfeE_vVSyfIWYwRTHwcCAKyYeQDbtv4yYglTMLaJ6emoUKZCdZMN1i11e1pz4WkejDAoGJok7lyROTmXYfjdFaCLX5y_8APjZM1FyrxECkJKlT0PBUTYN09ioEiqxNq86h-RZKnU81vjsDWxjgGMGK5Ois3DUNV8hvaTKo9sCImP_nodgyir0z-EF8cm8mxYHgVIdzn8jV2ldwMAmwuryfvb_u8-yZxphKGyqDO9DBJKCB4p7dK4hYqEKgFfEeLu3zA0ELmbRTk3Gopl76lkMI-q8fPdhBKVKVi8x3PNMr4Xj9S-MW7d-ZRSJsQQ5wm2lkLtb8t4crG8gBvOTynpWpihAgY-XSX3qXoMjt9rzy9K2xuWk2BMGAcAdqlAbO0i9DVBAqSyaWSIzxVtwJodfzxqfxrc0nBe6YvGXcFJKKWsMuqAt0fUa7iL9pJ6BsBrpXLCHjzCDkVQPiYxzhDhQltIxbzsSxFezIXPzPwB504Lkx0dB9oYI6-pak9IqO6NFP78u7We87AZ8YcOMgFCS76XbbwYbTMB3lyKVtjAMiMbCCS4dVZ8VVPKEwo3g73TtQtBxEUqhzR80ZJg6IGV_YA1duHz3YkD-NT88Wlt1D8HdhVEfcitKVBX29PaIm8lJDASDVz7wTMKy5BHQXfBMIiU3Pcr94x-3OSUpgSPP4p_LPp0Rg7YHLkE__iL0Jn-e98A6bkFgsETSZB5gstNDyWeLK9T1PIcoS8OtpRaY1aU0KA4oYVIdtkJZ0LKnuhPmWl8vpaTm5spb8WpIRmSqI34t3NN2Sx1bvmRbzU_Vo5cA0tEOv9Zkx1dCUWMuTeTHBSwrdlDnUb9km2XzK-8mSm3s=s360-c-no";
+
+// Shared outer shell: transparent wrapper (no page-background tint) so
+// the email just sits on whatever background the client already uses,
+// single white card, thin hairlines instead of heavy borders/shadows,
+// logo + brand mark in the header, quiet footer disclaimer. Kept
+// deliberately plain.
 function emailShell(bodyHtml) {
-  return `<div style="background:${COLORS.pageBg};padding:24px 12px;font-family:${FONT};">
+  return `<div style="padding:24px 12px;font-family:${FONT};">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:0 auto;background:${COLORS.card};border:1px solid ${COLORS.border};border-radius:10px;">
       <tr>
-        <td style="padding:20px 24px;border-bottom:1px solid ${COLORS.border};">
-          <span style="font-family:${FONT};font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:${COLORS.text};">BBM</span>
+        <td style="padding:18px 24px;border-bottom:1px solid ${COLORS.border};">
+          <table role="presentation" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="padding-right:10px;vertical-align:middle;">
+                <div style="height:28px;overflow:hidden;line-height:0;">
+                  <img
+                    src="${LOGO_URL}"
+                    alt="BBM"
+                    height="36"
+                    style="height:36px;width:auto;display:block;border:0;"
+                  >
+                </div>
+              </td>
+              <td style="vertical-align:middle;">
+                <span style="font-family:${FONT};font-size:17px;font-weight:700;letter-spacing:.04em;color:${COLORS.text};">BBM</span>
+              </td>
+            </tr>
+          </table>
         </td>
       </tr>
       <tr>
