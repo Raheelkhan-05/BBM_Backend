@@ -42,7 +42,7 @@ function isPoOpen(po) {
 // reopened — see repeatOrderLifecycle.service.js) and 'not_interested' is
 // a closed state, same idea as a dead lead/enquiry. Neither needs a
 // follow-up chase, so both are excluded from this digest entirely.
-const CLOSED_REPEAT_ORDER_STATUSES = new Set(["order_placed", "not_interested"]);
+const CLOSED_REPEAT_ORDER_STATUSES = new Set(["order_placed", "not_interested","unassigned"]);
 
 // Mirrors CLOSED_STATUSES in pendingTasks.service.js
 const CLOSED_STAGE_VALUES = new Set(["Approved", REJECTED_STAGE]);
