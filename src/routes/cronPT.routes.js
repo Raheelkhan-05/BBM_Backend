@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { cronSyncPendingTasks, cronSendPendingTasksDigest } from "../controllers/adminActivity.controller.js";
+import { cronSyncPendingTasks, cronSendPendingTasksDigest, cronSendUserDigests } from "../controllers/adminActivity.controller.js";
 
 const router = Router();
 
@@ -7,5 +7,6 @@ const router = Router();
 // Protected instead by CRON_SECRET checked inside each handler.
 router.get("/pending-tasks/sync", cronSyncPendingTasks);
 router.get("/pending-tasks/digest", cronSendPendingTasksDigest);
+router.get("/user-digest/send", cronSendUserDigests);
 
 export default router;

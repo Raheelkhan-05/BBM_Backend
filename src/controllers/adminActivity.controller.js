@@ -9,6 +9,7 @@ import {
 import { syncPendingTaskSnapshots, buildPendingTasksReport } from "../services/pendingTasks.service.js";
 import { generatePendingTasksPdfBuffer } from "../utils/generatePendingTasksPdfBuffer.js";
 import { sendMailWithRetry } from "../config/mailer.js";
+import { sendDailyUserDigests } from "../services/userDigestReport.service.js";
 
 
 function requireAdmin(req, res) {
@@ -26,7 +27,18 @@ function requireCronSecret(req, res) {
     return false;
   }
   return true;
-}
+} 
+
+export const cronSendUserDigests = async (req, res) => {
+  if (!requireCronSecret(req, res)) return;
+  try {
+    const results = await sendDailyUserDigests();
+    return res.json({ success: true, ranAt: new Date().toISOString(), results });
+  } catch (err) {
+    console.error("[cron user digest] failed:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
 
 export const cronSyncPendingTasks = async (req, res) => {
   if (!requireCronSecret(req, res)) return;
