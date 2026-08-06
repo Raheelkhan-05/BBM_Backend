@@ -544,28 +544,7 @@ const LOGO_URL = "https://lh3.googleusercontent.com/a-/ALV-UjUYV3SgWfaGuDePY-q3K
 // deliberately plain.
 function emailShell(bodyHtml) {
   return `<div style="padding:24px 12px;font-family:${FONT};">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:0 auto;background:${COLORS.card};border:1px solid ${COLORS.border};border-radius:10px;">
-      <tr>
-        <td style="padding:18px 24px;border-bottom:1px solid ${COLORS.border};">
-          <table role="presentation" cellpadding="0" cellspacing="0">
-            <tr>
-              <td style="padding-right:10px;vertical-align:middle;">
-                <div style="height:28px;overflow:hidden;line-height:0;">
-                  <img
-                    src="${LOGO_URL}"
-                    alt="BBM"
-                    height="32"
-                    style="height:32px;width:auto;display:block;border:0;"
-                  >
-                </div>
-              </td>
-              <td style="vertical-align:middle;">
-                <span style="font-family:${FONT};font-size:14px;font-weight:700;letter-spacing:.04em;color:${COLORS.text};">BBM</span>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:720px;margin:0 auto;background:${COLORS.card};border:1px solid ${COLORS.border};border-radius:10px;">
       <tr>
         <td style="padding:20px 24px 4px;">
           ${bodyHtml}
