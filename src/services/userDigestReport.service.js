@@ -554,13 +554,13 @@ function emailShell(bodyHtml) {
                   <img
                     src="${LOGO_URL}"
                     alt="BBM"
-                    height="36"
-                    style="height:36px;width:auto;display:block;border:0;"
+                    height="32"
+                    style="height:32px;width:auto;display:block;border:0;"
                   >
                 </div>
               </td>
               <td style="vertical-align:middle;">
-                <span style="font-family:${FONT};font-size:17px;font-weight:700;letter-spacing:.04em;color:${COLORS.text};">BBM</span>
+                <span style="font-family:${FONT};font-size:14px;font-weight:700;letter-spacing:.04em;color:${COLORS.text};">BBM</span>
               </td>
             </tr>
           </table>
