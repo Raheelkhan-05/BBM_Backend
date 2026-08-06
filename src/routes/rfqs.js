@@ -28,12 +28,12 @@ router.post("/:rfqId/followups", createFollowup);
 router.put("/followups/:id", updateFollowup);
 router.delete("/followups/:id", deleteFollowup);
 
-router.use(roleGuard(["Admin", "SalesCoordinator"]));
+router.use(roleGuard(["Admin", "SalesCoordinator", "Salesperson"]));
 router.get("/:id/activity", authenticate, getRFQActivity);
 router.get("/followups/due", getDueFollowups);
 router.post("/:id/followups/resolve", resolveFollowup);
 
-router.patch("/:id/mark-dead", markRFQDead);
+router.patch("/:id/mark-dead", authenticate, markRFQDead);
 router.patch("/:id/revive", authenticate, reviveRFQ);
 router.delete("/:id/purge", authenticate, purgeRFQ);
 
