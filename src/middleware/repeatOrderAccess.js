@@ -20,6 +20,7 @@
 const REPEAT_ORDER_MANAGERS = new Set([
   "jay@bbmpvtltd.com",
   "communication@bbmpvtltd.com",
+  "account@bbmpvtltd.com",
 ]);
 
 function norm(email) {
