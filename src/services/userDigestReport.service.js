@@ -250,11 +250,24 @@ export async function buildEnquiryTasksByUser() {
 //    collection_active_manual / snoozed_until pause mechanism, same as
 //    withCollectionActive on the collections/billing side.
 // ══════════════════════════════════════════════════════════════════════
+// A bill is "active for collection" (i.e. worth chasing / including in
+// the digest) once its due date has passed — due_date defaults to
+// bill_date + credit_days, but next_followup_date or snoozed_until (set
+// whenever someone logs a call, promise-to-pay, etc.) push that gate
+// further out. Both act the same way: "don't resurface until this
+// date", so we gate on whichever pushes the furthest into the future.
+//
+// collection_active_manual is a separate override on top of all that:
+//   - false → always excluded, no matter what any date says
+//   - true  → always included, bypassing the date gate entirely
+//   - null  → normal date-gated behavior described above
 function isCollectionActive(bill, today) {
-  if (bill.collection_active_manual === false) {
-    return !!bill.snoozed_until && bill.snoozed_until <= today; // only "wakes up" once snooze expires
-  }
-  return true; // null or true = active
+  if (bill.collection_active_manual === false) return false;
+  if (bill.collection_active_manual === true) return true;
+
+  const gateDates = [bill.due_date, bill.next_followup_date, bill.snoozed_until].filter(Boolean);
+  const gateDate = gateDates.sort().pop(); // latest of the three wins
+  return !gateDate || gateDate <= today;
 }
 
 export async function buildBillDuesDigest() {
@@ -264,7 +277,7 @@ export async function buildBillDuesDigest() {
     fetchAllPagedSimple(
       "bills",
       "id, party_name, bill_no, bill_date, balance_amount, status, location, mobile_1, mobile_2, " +
-        "next_followup_date, last_reason, collection_active_manual, snoozed_until, deleted_at"
+        "next_followup_date, due_date, last_reason, collection_active_manual, snoozed_until, deleted_at"
     ),
     fetchAllPagedSimple("bill_cheques", "bill_id, amount, cheque_no, bank_name, cheque_date, status"),
   ]);
@@ -276,6 +289,7 @@ export async function buildBillDuesDigest() {
     .filter((b) => !b.deleted_at && b.status === "remaining" && isCollectionActive(b, today))
     .map((b) => {
       const cheque = chequeByBill.get(b.id);
+      const dueDateRaw = b.next_followup_date || b.due_date || null;
       return {
         billId: b.id,
         party: b.party_name,
@@ -285,13 +299,12 @@ export async function buildBillDuesDigest() {
         mobile: b.mobile_1 || b.mobile_2 || "—",
         balanceFmt: fmtINR(b.balance_amount),
         lastReason: b.last_reason || "—",
-        // Cheque number is included whenever recorded, alongside amount / bank / date.
         pendingCheque: cheque
           ? `${fmtINR(cheque.amount)}${cheque.cheque_no ? ` (Cheque #${cheque.cheque_no})` : ""} — ${cheque.bank_name || "Bank not recorded"}, dated ${fmtDateShort(cheque.cheque_date) || "—"}`
           : null,
-        dueDateRaw: b.next_followup_date || null,
-        dueDateFmt: fmtDateShort(b.next_followup_date) || "Not scheduled",
-        bucket: dueBucket(b.next_followup_date, today),
+        dueDateRaw,
+        dueDateFmt: fmtDateShort(dueDateRaw) || "Not scheduled",
+        bucket: dueBucket(dueDateRaw, today),
       };
     });
 
