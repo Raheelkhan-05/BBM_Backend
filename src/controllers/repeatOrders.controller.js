@@ -246,6 +246,17 @@ function excelDateToISO(val) {
   return null;
 }
 
+// Indian financial year: Apr 1 – Mar 31. A bill dated any day in that
+// window belongs to the FY starting that April. e.g. 15-02-2026 (Feb
+// 2026) is FY "2025-26"; 02-04-2026 (Apr 2026) is FY "2026-27".
+function financialYearLabel(billDateISO) {
+  const [yStr, mStr] = billDateISO.split("-"); // "YYYY-MM-DD"
+  const y = Number(yStr), m = Number(mStr);
+  const fyStartYear = m >= 4 ? y : y - 1;
+  const fyEndYearShort = String((fyStartYear + 1) % 100).padStart(2, "0");
+  return `${fyStartYear}-${fyEndYearShort}`; // "2026-27"
+}
+
 function parseRow(row) {
   const mapped = {};
   for (const rawKey of Object.keys(row)) {
@@ -255,9 +266,16 @@ function parseRow(row) {
   }
   if (!mapped.party_name || !mapped.bill_no || !mapped.product_name) return null;
 
+  const billDateISO = excelDateToISO(mapped.bill_date);
+  if (!billDateISO) return null; // can't FY-scope a bill_no without a valid bill date
+
+  const fy = financialYearLabel(billDateISO);          // "2026-27"
+  const rawBillNo = String(mapped.bill_no).trim();      // "GT/3"
+  const billNo = `${fy}-${rawBillNo}`;                  // "2026-27-GT/3"
+
   return {
-    bill_no:          String(mapped.bill_no).trim(),
-    bill_date:        excelDateToISO(mapped.bill_date),
+    bill_no:          billNo,
+    bill_date:        billDateISO,
     party_name:       String(mapped.party_name).trim(),
     location:         mapped.location ? String(mapped.location).trim() : null,
     gstin:            mapped.gstin ? String(mapped.gstin).trim() : null,
