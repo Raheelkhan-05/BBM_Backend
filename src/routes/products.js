@@ -6,7 +6,7 @@ import { getProducts, createProduct, updateProduct, deleteProduct } from "../con
 const router = express.Router();
 router.use(authenticate);
 
-const managerOnly = roleGuard(["Admin", "SalesCoordinator"]);
+const managerOnly = roleGuard(["Admin", "SalesCoordinator","Salesperson"]);
 
 router.get("/", getProducts);
 router.post("/", managerOnly, createProduct);
