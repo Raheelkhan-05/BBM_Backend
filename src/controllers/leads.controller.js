@@ -137,13 +137,27 @@ const WITH_CREATOR_UPDATER =
 // logged-in user's id.
 export const getLeads = async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from("leads")
-      .select(WITH_CREATOR_UPDATER)
-      .is("deleted_at", null)
-      .order("created_at", { ascending: false });
-    if (error) return res.status(400).json({ success: false, message: error.message });
-    return res.json({ success: true, leads: data });
+    const PAGE = 1000;
+    let from = 0;
+    let all = [];
+
+    while (true) {
+      const { data, error } = await supabaseAdmin
+        .from("leads")
+        .select(WITH_CREATOR_UPDATER)
+        .is("deleted_at", null)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: true }) // stable tiebreaker so pages don't skip or repeat rows
+        .range(from, from + PAGE - 1);
+
+      if (error) return res.status(400).json({ success: false, message: error.message });
+
+      all = all.concat(data);
+      if (data.length < PAGE) break;
+      from += PAGE;
+    }
+
+    return res.json({ success: true, leads: all });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
