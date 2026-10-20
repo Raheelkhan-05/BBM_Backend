@@ -10,6 +10,7 @@ import { syncPendingTaskSnapshots, buildPendingTasksReport } from "../services/p
 import { generatePendingTasksPdfBuffer } from "../utils/generatePendingTasksPdfBuffer.js";
 import { sendMailWithRetry } from "../config/mailer.js";
 import { sendDailyUserDigests } from "../services/userDigestReport.service.js";
+import { filterDigestRecipients } from "../config/digestExclusions.js";
 
 
 function requireAdmin(req, res) {
@@ -54,8 +55,10 @@ export const cronSyncPendingTasks = async (req, res) => {
 export const cronSendPendingTasksDigest = async (req, res) => {
   if (!requireCronSecret(req, res)) return;
   try {
-    const recipients = (process.env.PENDING_TASKS_DIGEST_TO || "")
+    const configured = (process.env.PENDING_TASKS_DIGEST_TO || "")
       .split(",").map((s) => s.trim()).filter(Boolean);
+    // Drop anyone on the digest exclusion list (e.g. jay@bbmpvtltd.com)
+    const recipients = filterDigestRecipients(configured);
     if (!recipients.length) {
       return res.status(200).json({ success: true, skipped: true, reason: "no recipients configured" });
     }

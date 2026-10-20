@@ -17,7 +17,7 @@ import { sendMail } from "../config/mailer.js";
 // recipient, even though they can't see each other).
 const REPORT_RECIPIENTS = [
   "communication@bbmpvtltd.com",
-  "jay@bbmpvtltd.com",
+  // "jay@bbmpvtltd.com",
   // "someoneelse@bbmpvtltd.com",
 ];
 

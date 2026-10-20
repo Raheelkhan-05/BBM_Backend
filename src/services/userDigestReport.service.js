@@ -16,6 +16,7 @@ import { createClient } from "@supabase/supabase-js";
 import { REJECTED_STAGE } from "../constants/stages.js";
 import { fmtINR } from "./dailyReport.service.js";
 import { sendMailWithRetry } from "../config/mailer.js";
+import { isDigestExcluded, filterDigestRecipients } from "../config/digestExclusions.js";
 
 const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -628,6 +629,12 @@ export async function sendDailyUserDigests() {
 
   const results = [];
   for (const u of activeUsers) {
+    // Users on the digest exclusion list (e.g. jay@bbmpvtltd.com) get no mail.
+    if (isDigestExcluded(u.email)) {
+      results.push({ userId: u.id, email: u.email, skipped: true, reason: "excluded from digests" });
+      continue;
+    }
+
     const leadTasks = leadsByUser.get(u.id) || [];
     const enquiryTasks = enquiriesByUser.get(u.id) || [];
     const repeatOrderTasks = repeatOrdersByUser.get(u.id) || [];
@@ -644,12 +651,19 @@ export async function sendDailyUserDigests() {
 
   const [billTasks, poTasks] = await Promise.all([buildBillDuesDigest(), buildPurchaseOrderDuesDigest()]);
   if (billTasks.length || poTasks.length) {
-    const adminResult = await sendMailWithRetry({
-      to: ["info@bbmpvtltd.com", "account@bbmpvtltd.com", "communication@bbmpvtltd.com"],
-      subject: `[BBM] Bill & PO Dues — ${fmtDateShort(todayISTDateStr())}`,
-      html: buildAdminDigestHtml({ billTasks, poTasks }),
-    });
-    results.push({ admin: true, success: adminResult.success });
+    const adminRecipients = filterDigestRecipients([
+      "info@bbmpvtltd.com",
+      "account@bbmpvtltd.com",
+      "communication@bbmpvtltd.com",
+    ]);
+    if (adminRecipients.length) {
+      const adminResult = await sendMailWithRetry({
+        to: adminRecipients,
+        subject: `[BBM] Bill & PO Dues — ${fmtDateShort(todayISTDateStr())}`,
+        html: buildAdminDigestHtml({ billTasks, poTasks }),
+      });
+      results.push({ admin: true, success: adminResult.success });
+    }
   }
 
   return results;
